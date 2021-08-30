@@ -160,7 +160,7 @@ func RestartScale(args *RestartScaleArgs, _ *zap.SugaredLogger) error {
 	return nil
 }
 
-func GetService(envName, productName, serviceName string, log *zap.SugaredLogger) (ret *SvcResp, err error) {
+func GetService(envName, productName, serviceName string, workLoadType string, log *zap.SugaredLogger) (ret *SvcResp, err error) {
 	ret = &SvcResp{
 		ServiceName: serviceName,
 		EnvName:     envName,
@@ -181,40 +181,84 @@ func GetService(envName, productName, serviceName string, log *zap.SugaredLogger
 	namespace := env.Namespace
 	switch env.Source {
 	case setting.SourceFromExternal, setting.SourceFromHelm:
-		svc, found, err := getter.GetService(namespace, serviceName, kubeClient)
-		if err != nil {
-			return nil, e.ErrGetService.AddErr(err)
-		}
-		if !found {
-			return nil, e.ErrGetService.AddDesc(fmt.Sprintf("service %s not found", serviceName))
-		}
-		ret.Services = append(ret.Services, wrapper.Service(svc).Resource())
+		//var selector labels.Selector
+		//switch workLoadType {
+		//case "service":
+		//	svc, found, err := getter.GetService(namespace, serviceName, kubeClient)
+		//	if err != nil {
+		//		return nil, e.ErrGetService.AddErr(err)
+		//	}
+		//	if !found {
+		//		return nil, e.ErrGetService.AddDesc(fmt.Sprintf("service %s not found", serviceName))
+		//	}
+		//	ret.Services = append(ret.Services, wrapper.Service(svc).Resource())
+		//	selector = labels.SelectorFromValidatedSet(svc.Spec.Selector)
+		//case "statefulSet":
+		//	if svcc, found, _ := getter.GetStatefulSet(namespace, serviceName, kubeClient); found {
+		//		svc := &corev1.Service{
+		//			TypeMeta:   metav1.TypeMeta{},
+		//			ObjectMeta: metav1.ObjectMeta{},
+		//			Spec:       corev1.ServiceSpec{Selector: svcc.Spec.Selector.MatchLabels},
+		//			Status:     corev1.ServiceStatus{},
+		//		}
+		//		ret.Services = append(ret.Services, wrapper.Service(svc).Resource())
+		//	}
+		//case "deployment":
+		//	if deploy, found, _ := getter.GetDeployment(namespace, serviceName, kubeClient); found {
+		//		svc := &corev1.Service{
+		//			TypeMeta:   metav1.TypeMeta{},
+		//			ObjectMeta: metav1.ObjectMeta{},
+		//			Spec:       corev1.ServiceSpec{Selector: deploy.Spec.Selector.MatchLabels},
+		//			Status:     corev1.ServiceStatus{},
+		//		}
+		//		ret.Services = append(ret.Services, wrapper.Service(svc).Resource())
+		//	}
+		//}
 
-		selector := labels.SelectorFromValidatedSet(svc.Spec.Selector)
-		//deployment
-		if deployments, err := getter.ListDeployments(namespace, selector, kubeClient); err == nil {
-			log.Infof("namespace:%s , serviceName:%s , selector:%s , len(deployments):%d", namespace, serviceName, selector, len(deployments))
-			for _, d := range deployments {
-				scale := getDeploymentWorkloadResource(d, kubeClient, log)
+		switch workLoadType {
+		case "statefulSet":
+			if statefulSets, exist, err := getter.GetStatefulSet(namespace, serviceName, kubeClient); err == nil {
+				if !exist || err != nil {
+					return nil, e.ErrGetService.AddDesc(fmt.Sprintf("service %s not found", serviceName))
+				}
+				scale := getStatefulSetWorkloadResource(statefulSets, kubeClient, log)
 				ret.Scales = append(ret.Scales, scale)
 			}
-		}
-		//statefulSets
-		if statefulSets, err := getter.ListStatefulSets(namespace, selector, kubeClient); err == nil {
-			log.Infof("namespace:%s , serviceName:%s , selector:%s , len(statefulSets):%d", namespace, serviceName, selector, len(statefulSets))
-			for _, sts := range statefulSets {
-				scale := getStatefulSetWorkloadResource(sts, kubeClient, log)
-				ret.Scales = append(ret.Scales, scale)
+		case "deployment":
+			d, exist, err := getter.GetDeployment(namespace, serviceName, kubeClient)
+			if !exist || err != nil {
+				return nil, e.ErrGetService.AddDesc(fmt.Sprintf("service %s not found", serviceName))
+			}
+			scale := getDeploymentWorkloadResource(d, kubeClient, log)
+			ret.Scales = append(ret.Scales, scale)
+		default:
+			svc, found, err := getter.GetService(namespace, serviceName, kubeClient)
+			if err != nil {
+				return nil, e.ErrGetService.AddErr(err)
+			}
+			if !found {
+				return nil, e.ErrGetService.AddDesc(fmt.Sprintf("service %s not found", serviceName))
+			}
+			ret.Services = append(ret.Services, wrapper.Service(svc).Resource())
+
+			selector := labels.SelectorFromValidatedSet(svc.Spec.Selector)
+			//deployment
+			if deployments, err := getter.ListDeployments(namespace, selector, kubeClient); err == nil {
+				log.Infof("namespace:%s , serviceName:%s , selector:%s , len(deployments):%d", namespace, serviceName, selector, len(deployments))
+				for _, d := range deployments {
+					scale := getDeploymentWorkloadResource(d, kubeClient, log)
+					ret.Scales = append(ret.Scales, scale)
+				}
+			}
+			//ingress
+			if ingresses, err := getter.ListIngresses(namespace, selector, kubeClient); err == nil {
+				log.Infof("namespace:%s , serviceName:%s , selector:%s , len(ingresses):%d", namespace, serviceName, selector, len(ingresses))
+				for _, ing := range ingresses {
+					ret.Ingress = append(ret.Ingress, wrapper.Ingress(ing).Resource())
+				}
 			}
 		}
 
-		//ingress
-		if ingresses, err := getter.ListIngresses(namespace, selector, kubeClient); err == nil {
-			log.Infof("namespace:%s , serviceName:%s , selector:%s , len(ingresses):%d", namespace, serviceName, selector, len(ingresses))
-			for _, ing := range ingresses {
-				ret.Ingress = append(ret.Ingress, wrapper.Ingress(ing).Resource())
-			}
-		}
 	default:
 		var service *commonmodels.ProductService
 		for _, svcArray := range env.Services {
