@@ -120,6 +120,7 @@ func CreateProduct(c *gin.Context) {
 		return
 	}
 
+	//
 	args.UpdateBy = ctx.Username
 	ctx.Err = service.CreateProduct(
 		ctx.Username, ctx.RequestID, args, ctx.Logger,
