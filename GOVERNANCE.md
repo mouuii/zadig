@@ -22,6 +22,9 @@ Besides being the users of Zadig, which is a great way of contributing to the co
 Note that the latter role is built on top of the former -- i.e. A council member is also a maintainer and a contributor, a maintainer is a contributor as well. Please see the following table for their primary responsibilities:
 | Role           | Primary responsibilities                                                                                                                 ##  
 
+
+
+
 ##
 
 ##                                                                                                                                                                                                                                                                                                                                                                           |
