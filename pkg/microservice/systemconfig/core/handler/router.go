@@ -35,4 +35,8 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	{
 		features.GET("/:name", GetFeature)
 	}
+	emails := router.Group("emails")
+	{
+		emails.POST("/host", AddHost)
+	}
 }
