@@ -10,10 +10,10 @@ func (*Router) Inject(router *gin.RouterGroup) {
 
 	dev := router.Group("")
 	{
-		dev.POST("/workflowTask/create", CreateWorkflowTask)
-		dev.DELETE("workflowTask/id/:id/pipelines/:name/cancel", CancelWorkflowTask)
-		dev.POST("/workflowTask/id/:id/pipelines/:name/restart", RestartWorkflowTask)
-		dev.GET("/workflowTask", ListWorkflowTask)
+		dev.POST("/workflow/workflowTask/create", CreateWorkflowTask)
+		dev.DELETE("/workflow/workflowTask/id/:id/pipelines/:name/cancel", CancelWorkflowTask)
+		dev.POST("/workflow/workflowTask/id/:id/pipelines/:name/restart", RestartWorkflowTask)
+		dev.GET("/workflow/workflowTask", ListWorkflowTask)
 		dev.GET("/dc/releases", ListDelivery)
 	}
 }
