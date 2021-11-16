@@ -1,6 +1,7 @@
 # New Makefile for multi-architecture
 .PHONY: all
 
+
 IMAGE_REPOSITORY = ccr.ccs.tencentyun.com/koderover-rc
 VERSION ?= $(shell date +'%Y%m%d%H%M%S')
 
