@@ -23,4 +23,4 @@ steps:
       - go test -coverprofile=coverage.xml $(cat ut.file)
     working_directory: '${{KR_VOLUME_PATH}}'
   test:
-    title: test
+    title: test-hello-world
