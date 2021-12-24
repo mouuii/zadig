@@ -1,5 +1,5 @@
-apiVersion:
-kind: Service
+apiVersion: 
+kind: 
 metadata:
   labels:
     app: result
