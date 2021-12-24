@@ -1,9 +1,11 @@
+【】【】【】
 apiVersion: v1
 kind: Service
 metadata:
   labels:
     app: result
     version: rc-origin
+    version: 1
   name: result
 spec:
   type: NodePort
