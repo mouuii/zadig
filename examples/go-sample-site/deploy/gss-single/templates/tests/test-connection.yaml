@@ -1,0 +1,16 @@
+{{- $fullName := include "go-sample-site.fullname" . -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ $fullName }}-test-connection"
+  labels:
+    {{- include "go-sample-site.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  containers:
+    - name: wget
+      image: busybox
+      command: ['wget']
+      args: ['{{ $fullName }}:{{ .Values.service.port }}']
+  restartPolicy: Never

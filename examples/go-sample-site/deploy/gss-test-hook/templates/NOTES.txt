@@ -1,0 +1,1 @@
+Release {{ .Release.Name }} for chart {{ .Chart.Name }}-{{ .Chart.Version }} is installed successfully in namespace {{ .Release.Namespace }}

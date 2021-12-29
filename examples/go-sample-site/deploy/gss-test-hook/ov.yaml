@@ -1,0 +1,11 @@
+test2.yaml: |
+    debug: 1
+    loglevel: 2
+    testData: 
+      secondData:3
+first:
+  f1: vf1
+  f2: vf2
+secand:
+  s1: vs1
+  s2: vs2

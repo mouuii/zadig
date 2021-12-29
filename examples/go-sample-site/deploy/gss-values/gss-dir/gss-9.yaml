@@ -1,0 +1,34 @@
+# Default values for go-sample-site.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+env: dev
+
+ingressClassName: koderover-admin-nginx
+
+image:
+  repository: ccr.ccs.tencentyun.com/trial/go-sample-site
+  pullPolicy: IfNotPresent
+  tag: "0.1.0"
+
+testSpec:
+  imageNew:
+    repo: ccr.ccs.tencentyun.com/trial/go-sample-site
+    pullPolicy: IfNotPresent
+    tag: "0.2.1"
+
+imagePullSecrets:
+  - name: default-registry-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+mLines:
+  first.yaml: |
+    ttt: ttt
+    bbb: bbb
+    xxx: xxx

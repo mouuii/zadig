@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name:  {{ .Release.Name }}
+  labels:
+    {{- include "go-sample-site.labels" . | nindent 4 }}
+data:
+  a: b2
+  b: d5
