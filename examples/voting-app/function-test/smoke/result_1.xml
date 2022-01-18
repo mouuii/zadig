@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+  <testsuite tests="8" failures="0" successes="8" skips="1" time="160.318">
+      <testcase name="Smoke Test 权限管理 - 项目管理员删除修改项目成功，普通用户无权限删除项目" classname="E2E Suite" time="0.155922912"></testcase>
+      <testcase name="Smoke Test Webhook 配置 - 从 GitHub 代码库导入服务后，创建 Webhook 成功" classname="E2E Suite" time="0.422994305"></testcase>
+      <testcase name="Smoke Test Helm Chart 项目 - 创建 Helm Chart 部署的项目并部署服务，查看集成环境" classname="E2E Suite" time="0.070303796"></testcase>
+      <testcase name="Smoke Test K8s YAML 服务模板 - 基于 K8s YAML 模板创建服务，并更新集成环境" classname="E2E Suite" time="4.3299411039999995"></testcase>
+      <testcase name="Smoke Test 指定构建资源 - 构建配置中使用托管集群，并指定 Namespace，触发构建可成功运行完毕" classname="E2E Suite" time="16.13986061"></testcase>
+      <testcase name="Smoke Test 工作流镜像回退功能 - 工作流中开启镜像回退功能，执行完毕后检查镜像版本" classname="E2E Suite" time="0.140571959"></testcase>
+      <testcase name="Smoke Test 版本交付 - 工作流场景: 在初始化成功新建的项目中 能够 end to end 创建、验证工作流、获取交付版本信息" classname="E2E Suite" time="7.371772149"></testcase>
+      <testcase name="Smoke Test 服务编排与环境更新 - 修改服务的编排顺序后，集成环境应该为可被更新的状态" classname="E2E Suite" time="0"><skipped message="pending"></skipped></testcase>
+  </testsuite>
