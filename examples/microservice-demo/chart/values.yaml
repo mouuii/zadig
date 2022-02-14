@@ -7,7 +7,7 @@ Backend:
   replicaCount: 1
   image:
     repository: ccr.ccs.tencentyun.com/trial/backend
-    tag: "20220214-demo2"
+    tag: "20220214-demo3"
 
 Frontend:
   replicaCount: 1
