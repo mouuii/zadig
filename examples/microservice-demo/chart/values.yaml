@@ -7,13 +7,13 @@ Backend:
   replicaCount: 1
   image:
     repository: ccr.ccs.tencentyun.com/koderover-public/backend
-    tag: "latest"
+    tag: "20210722161704-15-master"
 
 Frontend:
   replicaCount: 1
   image: 
     repository: ccr.ccs.tencentyun.com/koderover-public/frontend
-    tag: "latest"
+    tag: "20211225222757-2-master"
 
 domain: demo.domain.com
 port: 20219
