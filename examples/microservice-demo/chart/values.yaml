@@ -6,13 +6,13 @@ ingressClass: kr-nginx
 Backend:
   replicaCount: 1
   image:
-    repository: ccr.ccs.tencentyun.com/koderover-public/backend
+    repository: ccr.ccs.tencentyun.com/trial/backend
     tag: "20210722161704-15-master"
 
 Frontend:
   replicaCount: 1
   image: 
-    repository: ccr.ccs.tencentyun.com/koderover-public/frontend
+    repository: ccr.ccs.tencentyun.com/trial/frontend
     tag: "20211225222757-2-master"
 
 domain: demo.domain.com
