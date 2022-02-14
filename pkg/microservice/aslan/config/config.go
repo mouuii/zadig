@@ -98,6 +98,10 @@ func HubAgentImage() string {
 	return viper.GetString(setting.ENVHubAgentImage)
 }
 
+func ResourceServerImage() string {
+	return viper.GetString(setting.ENVResourceServerImage)
+}
+
 func KodespaceVersion() string {
 	return viper.GetString(setting.ENVKodespaceVersion)
 }
@@ -190,6 +194,10 @@ func PredatorImage() string {
 	return viper.GetString(setting.ENVPredatorImage)
 }
 
+func PackagerImage() string {
+	return viper.GetString(setting.EnvPackagerImage)
+}
+
 func DockerHosts() []string {
 	return strings.Split(viper.GetString(setting.ENVDockerHosts), ",")
 }
@@ -223,5 +231,21 @@ func ObjectStorageServicePath(project, service string) string {
 }
 
 func LocalServicePath(project, service string) string {
-	return configbase.LocalServicePath(project, service)
+	return configbase.LocalServicePathWithRevision(project, service, "latest")
+}
+
+func LocalServicePathWithRevision(project, service string, revision int64) string {
+	return configbase.LocalServicePathWithRevision(project, service, fmt.Sprintf("%d", revision))
+}
+
+func LocalDeliveryChartPathWithRevision(project, service string, revision int64) string {
+	return configbase.LocalServicePathWithRevision(project, service, fmt.Sprintf("delivery/%d", revision))
+}
+
+func ServiceNameWithRevision(serviceName string, revision int64) string {
+	return fmt.Sprintf("%s-%d", serviceName, revision)
+}
+
+func ServiceAccountNameForUser(userID string) string {
+	return fmt.Sprintf("%s-sa", userID)
 }

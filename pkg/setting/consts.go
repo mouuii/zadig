@@ -16,6 +16,8 @@ limitations under the License.
 
 package setting
 
+import "time"
+
 const LocalConfig = "local.env"
 
 // envs
@@ -28,6 +30,7 @@ const (
 	ENVMongoDBConnectionString = "MONGODB_CONNECTION_STRING"
 	ENVAslanDBName             = "ASLAN_DB"
 	ENVHubAgentImage           = "HUB_AGENT_IMAGE"
+	ENVResourceServerImage     = "RESOURCE_SERVER_IMAGE"
 	ENVMysqlUser               = "MYSQL_USER"
 	ENVMysqlPassword           = "MYSQL_PASSWORD"
 	ENVMysqlHost               = "MYSQL_HOST"
@@ -50,6 +53,7 @@ const (
 	ENVReaperImage      = "REAPER_IMAGE"
 	ENVReaperBinaryFile = "REAPER_BINARY_FILE"
 	ENVPredatorImage    = "PREDATOR_IMAGE"
+	EnvPackagerImage    = "PACKAGER_IMAGE"
 
 	ENVDockerHosts = "DOCKER_HOSTS"
 
@@ -245,6 +249,7 @@ const (
 	SourceFromExternal = "external"
 	// service from yaml template
 	ServiceSourceTemplate = "template"
+	SourceFromPM          = "pm"
 
 	ProdENV = "prod"
 	TestENV = "test"
@@ -269,6 +274,16 @@ const (
 	PublishType = "publish"
 
 	FunctionTestType = "function"
+)
+
+const (
+	DeliveryVersionTypeChart       = "HelmChart"
+	DeliveryVersionTypeK8SWorkflow = "K8SWorkflow"
+)
+
+const (
+	DeliveryDeployTypeImage = "image"
+	DeliveryDeployTypeChart = "chart"
 )
 
 const (
@@ -300,15 +315,20 @@ const (
 )
 
 const (
+	BuildChartPackage = "chart-package"
+)
+
+const (
 	JenkinsBuildJob = "jenkins-build"
 )
 
 // counter prefix
 const (
-	PipelineTaskFmt = "PipelineTask:%s"
-	WorkflowTaskFmt = "WorkflowTask:%s"
-	TestTaskFmt     = "TestTask:%s"
-	ServiceTaskFmt  = "ServiceTask:%s"
+	PipelineTaskFmt   = "PipelineTask:%s"
+	WorkflowTaskFmt   = "WorkflowTask:%s"
+	WorkflowTaskV3Fmt = "WorkflowTaskV3:%s"
+	TestTaskFmt       = "TestTask:%s"
+	ServiceTaskFmt    = "ServiceTask:%s"
 )
 
 // Product Status
@@ -322,22 +342,27 @@ const (
 	ProductStatusUnstable = "Unstable"
 )
 
+// DeliveryVersion status
+const (
+	DeliveryVersionStatusSuccess  = "success"
+	DeliveryVersionStatusFailed   = "failed"
+	DeliveryVersionStatusCreating = "creating"
+	DeliveryVersionStatusRetrying = "retrying"
+)
+
+const (
+	DeliveryVersionPackageStatusSuccess   = "success"
+	DeliveryVersionPackageStatusFailed    = "failed"
+	DeliveryVersionPackageStatusWaiting   = "waiting"
+	DeliveryVersionPackageStatusUploading = "uploading"
+)
+
 const (
 	NormalModeProduct = "normal"
 )
 
-// roles
 const (
-	RoleOwnerID = 3
-	RoleUserID  = 4
-
-	RoleUser        = "user"        // 普通用户
-	RoleOwner       = "owner"       // 项目管理员
-	RoleAdmin       = "admin"       // 超级管理员
-	RoleContributor = "contributor" //开源项目贡献者
-	SystemUser      = "system"
-
-	GuestAccount = "guest2019"
+	SystemUser = "system"
 )
 
 // events
@@ -525,6 +550,8 @@ const MaxTries = 1
 
 const DogFood = "/var/run/koderover-dog-food"
 
+const ProgressFile = "/var/log/job-progress"
+
 const (
 	ResponseError = "error"
 	ResponseData  = "response"
@@ -535,11 +562,49 @@ const ChartTemplatesPath = "charts"
 type RoleType string
 
 const (
-	Contributor        RoleType = "contributor"
-	ReadOnly           RoleType = "readonly"
-	Admin              RoleType = "admin"
-	RoleBindingNameFmt string   = "user:%s,role:%s,project:%s"
+	Contributor  RoleType = "contributor"
+	ReadOnly     RoleType = "read-only"
+	ProjectAdmin RoleType = "project-admin"
+	SystemAdmin  RoleType = "admin"
 )
 
 // ModernWorkflowType 自由编排工作流
 const ModernWorkflowType = "ModernWorkflow"
+
+const (
+	Subresource        = "subresource"
+	StatusSubresource  = "status"
+	IngressSubresource = "ingress"
+	ResourcesHeader    = "Resources"
+)
+
+type K8SClusterStatus string
+
+const (
+	Disconnected K8SClusterStatus = "disconnected"
+	Pending      K8SClusterStatus = "pending"
+	Normal       K8SClusterStatus = "normal"
+	Abnormal     K8SClusterStatus = "abnormal"
+)
+
+type ResetImagePolicyType string
+
+const (
+	ResetImagePolicyTaskCompleted      ResetImagePolicyType = "taskCompleted"
+	ResetImagePolicyTaskCompletedOrder ResetImagePolicyType = ""
+	ResetImagePolicyDeployFailed       ResetImagePolicyType = "deployFailed"
+	ResetImagePolicyTestFailed         ResetImagePolicyType = "testFailed"
+)
+
+const LocalClusterID = "0123456789abcdef12345678"
+
+const RequestModeOpenAPI = "openAPI"
+
+const DeployTimeout = 60 * 10 // 10 minutes
+
+const UpdateEnvTimeout = 60 * 5 * time.Second
+
+// list namespace type
+const (
+	ListNamespaceTypeCreate = "create"
+)

@@ -23,8 +23,10 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
@@ -33,8 +35,9 @@ import (
 )
 
 type ProductFindOptions struct {
-	Name    string
-	EnvName string
+	Name      string
+	EnvName   string
+	Namespace string
 }
 
 // ClusterId is a primitive.ObjectID{}.Hex()
@@ -49,6 +52,7 @@ type ProductListOptions struct {
 	ExcludeSource       string
 	Source              string
 	InProjects          []string
+	InEnvs              []string
 }
 
 type projectEnvs struct {
@@ -129,17 +133,37 @@ func (c *ProductColl) Find(opt *ProductFindOptions) (*models.Product, error) {
 	if opt.EnvName != "" {
 		query["env_name"] = opt.EnvName
 	}
+	if opt.Namespace != "" {
+		query["namespace"] = opt.Namespace
+	}
 
 	err := c.FindOne(context.TODO(), query).Decode(res)
 	return res, err
+}
+
+func (c *ProductColl) EnvCount() (int64, error) {
+	query := bson.M{"status": bson.M{"$ne": setting.ProductStatusDeleting}}
+
+	ctx := context.Background()
+	count, err := c.Collection.CountDocuments(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
 }
 
 func (c *ProductColl) List(opt *ProductListOptions) ([]*models.Product, error) {
 	var ret []*models.Product
 	query := bson.M{}
 
+	if opt == nil {
+		opt = &ProductListOptions{}
+	}
 	if opt.EnvName != "" {
 		query["env_name"] = opt.EnvName
+	} else if len(opt.InEnvs) > 0 {
+		query["env_name"] = bson.M{"$in": opt.InEnvs}
 	}
 	if opt.Name != "" {
 		query["product_name"] = opt.Name
@@ -229,6 +253,16 @@ func (c *ProductColl) UpdateErrors(owner, productName, errorMsg string) error {
 	query := bson.M{"env_name": owner, "product_name": productName}
 	change := bson.M{"$set": bson.M{
 		"error": errorMsg,
+	}}
+	_, err := c.UpdateOne(context.TODO(), query, change)
+
+	return err
+}
+
+func (c *ProductColl) UpdateRegistry(envName, productName, registryId string) error {
+	query := bson.M{"env_name": envName, "product_name": productName}
+	change := bson.M{"$set": bson.M{
+		"registry_id": registryId,
 	}}
 	_, err := c.UpdateOne(context.TODO(), query, change)
 
@@ -347,4 +381,32 @@ func (c *ProductColl) UpdateAll(envs []*models.Product) error {
 	_, err := c.BulkWrite(context.TODO(), ms)
 
 	return err
+}
+
+type nsObject struct {
+	ID        primitive.ObjectID `bson:"_id"`
+	Namespace string             `bson:"namespace"`
+}
+
+func (c *ProductColl) ListExistedNamespace() ([]string, error) {
+	nsList := make([]*nsObject, 0)
+	resp := sets.NewString()
+	selector := bson.D{
+		{"namespace", 1},
+	}
+	query := bson.M{"is_existed": true}
+	opt := options.Find()
+	opt.SetProjection(selector)
+	cursor, err := c.Collection.Find(context.TODO(), query, opt)
+	if err != nil {
+		return nil, err
+	}
+	err = cursor.All(context.TODO(), &nsList)
+	if err != nil {
+		return nil, err
+	}
+	for _, obj := range nsList {
+		resp.Insert(obj.Namespace)
+	}
+	return resp.List(), nil
 }

@@ -49,16 +49,10 @@ type Workflow struct {
 	DistributeStage *DistributeStage   `bson:"distribute_stage"             json:"distribute_stage"`
 	NotifyCtl       *NotifyCtl         `bson:"notify_ctl,omitempty"         json:"notify_ctl,omitempty"`
 	HookCtl         *WorkflowHookCtrl  `bson:"hook_ctl"                     json:"hook_ctl"`
-	IsFavorite      bool               `bson:"-"                            json:"is_favorite"`
-	LastestTask     *TaskInfo          `bson:"-"                            json:"lastest_task"`
-	LastSucessTask  *TaskInfo          `bson:"-"                            json:"last_task_success"`
-	LastFailureTask *TaskInfo          `bson:"-"                            json:"last_task_failure"`
-	TotalDuration   int64              `bson:"-"                            json:"total_duration"`
-	TotalNum        int                `bson:"-"                            json:"total_num"`
-	TotalSuccess    int                `bson:"-"                            json:"total_success"`
 
 	// ResetImage indicate whether reset image to original version after completion
-	ResetImage bool `json:"reset_image" bson:"reset_image"`
+	ResetImage       bool                         `bson:"reset_image"                  json:"reset_image"`
+	ResetImagePolicy setting.ResetImagePolicyType `bson:"reset_image_policy,omitempty" json:"reset_image_policy,omitempty"`
 	// IsParallel 控制单一工作流的任务是否支持并行处理
 	IsParallel bool `json:"is_parallel" bson:"is_parallel"`
 }
@@ -69,10 +63,12 @@ type WorkflowHookCtrl struct {
 }
 
 type WorkflowHook struct {
-	AutoCancel          bool              `bson:"auto_cancel"             json:"auto_cancel"`
-	CheckPatchSetChange bool              `bson:"check_patch_set_change"  json:"check_patch_set_change"`
-	MainRepo            *MainHookRepo     `bson:"main_repo"               json:"main_repo"`
-	WorkflowArgs        *WorkflowTaskArgs `bson:"workflow_args"           json:"workflow_args"`
+	AutoCancel          bool              `bson:"auto_cancel"               json:"auto_cancel"`
+	CheckPatchSetChange bool              `bson:"check_patch_set_change"    json:"check_patch_set_change"`
+	MainRepo            *MainHookRepo     `bson:"main_repo"                 json:"main_repo"`
+	WorkflowArgs        *WorkflowTaskArgs `bson:"workflow_args"             json:"workflow_args"`
+	IsYaml              bool              `bson:"is_yaml,omitempty"         json:"is_yaml,omitempty"`
+	YamlPath            string            `bson:"yaml_path,omitempty"       json:"yaml_path,omitempty"`
 }
 
 type MainHookRepo struct {
@@ -82,6 +78,8 @@ type MainHookRepo struct {
 	RepoOwner    string                 `bson:"repo_owner"                json:"repo_owner"`
 	RepoName     string                 `bson:"repo_name"                 json:"repo_name"`
 	Branch       string                 `bson:"branch"                    json:"branch"`
+	Tag          string                 `bson:"tag"                       json:"tag"`
+	Committer    string                 `bson:"committer"                 json:"committer"`
 	MatchFolders []string               `bson:"match_folders"             json:"match_folders,omitempty"`
 	CodehostID   int                    `bson:"codehost_id"               json:"codehost_id"`
 	Events       []config.HookEventType `bson:"events"                    json:"events"`
@@ -135,6 +133,11 @@ type TaskArgs struct {
 	CodeHostID     int                 `bson:"codehost_id"             json:"codehost_id"`
 }
 
+type CallbackArgs struct {
+	CallbackUrl  string                 `bson:"callback_url" json:"callback_url"`   // url-encoded full path
+	CallbackVars map[string]interface{} `bson:"callback_vars" json:"callback_vars"` // custom defied vars, will be set to body of callback request
+}
+
 // WorkflowTaskArgs 多服务工作流任务参数
 type WorkflowTaskArgs struct {
 	WorkflowName    string `bson:"workflow_name"                json:"workflow_name"`
@@ -169,12 +172,22 @@ type WorkflowTaskArgs struct {
 	CodehostID     int    `bson:"codehost_id"      json:"codehost_id"`
 	RepoOwner      string `bson:"repo_owner"       json:"repo_owner"`
 	RepoName       string `bson:"repo_name"        json:"repo_name"`
-
+	Committer      string `bson:"committer,omitempty"        json:"committer,omitempty"`
 	//github check run
 	HookPayload *HookPayload `bson:"hook_payload"            json:"hook_payload,omitempty"`
 	// 请求模式，openAPI表示外部客户调用
 	RequestMode string `json:"request_mode,omitempty"`
 	IsParallel  bool   `json:"is_parallel" bson:"is_parallel"`
+	EnvName     string `json:"env_name" bson:"-"`
+
+	Callback      *CallbackArgs   `bson:"callback"                    json:"callback"`
+	ReleaseImages []*ReleaseImage `bson:"release_images,omitempty"    json:"release_images,omitempty"`
+}
+
+type ReleaseImage struct {
+	Image         string `bson:"image"                    json:"image"`
+	ServiceName   string `bson:"service_name"             json:"service_name"`
+	ServiceModule string `bson:"service_module"           json:"service_module"`
 }
 
 type TestTaskArgs struct {
@@ -206,8 +219,9 @@ type BuildStage struct {
 
 // BuildModule ...
 type BuildModule struct {
-	Target         *ServiceModuleTarget `bson:"target"                 json:"target"`
-	BuildModuleVer string               `bson:"build_module_ver"       json:"build_module_ver"`
+	Target            *ServiceModuleTarget `bson:"target"                 json:"target"`
+	HideServiceModule bool                 `bson:"hide_service_module"    json:"hide_service_module"`
+	BuildModuleVer    string               `bson:"build_module_ver"       json:"build_module_ver"`
 }
 
 type ArtifactStage struct {
@@ -217,7 +231,8 @@ type ArtifactStage struct {
 
 // ArtifactModule ...
 type ArtifactModule struct {
-	Target *ServiceModuleTarget `bson:"target"                 json:"target"`
+	HideServiceModule bool                 `bson:"hide_service_module"    json:"hide_service_module"`
+	Target            *ServiceModuleTarget `bson:"target"                 json:"target"`
 }
 
 type TestStage struct {
@@ -315,6 +330,7 @@ type HookPayload struct {
 type TargetArgs struct {
 	Name             string            `bson:"name"                      json:"name"`
 	ServiceName      string            `bson:"service_name"              json:"service_name"`
+	ServiceType      string            `bson:"service_type,omitempty"    json:"service_type,omitempty"`
 	ProductName      string            `bson:"product_name"              json:"product_name"`
 	Build            *BuildArgs        `bson:"build"                     json:"build"`
 	Deploy           []DeployEnv       `bson:"deloy"                     json:"deploy"`

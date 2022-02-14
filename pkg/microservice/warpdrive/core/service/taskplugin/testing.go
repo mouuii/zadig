@@ -34,13 +34,13 @@ import (
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types"
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
 	"github.com/koderover/zadig/pkg/setting"
+	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	s3tool "github.com/koderover/zadig/pkg/tool/s3"
 	"github.com/koderover/zadig/pkg/util"
 )
 
-//InitializeTestTaskPlugin ...
 func InitializeTestTaskPlugin(taskType config.TaskType) TaskPlugin {
 	return &TestPlugin{
 		Name:       taskType,
@@ -63,34 +63,27 @@ func (p *TestPlugin) SetAckFunc(func()) {
 }
 
 const (
-	// TestingV2TaskTimeout ...
 	TestingV2TaskTimeout = 60 * 60 // 60 minutes
 )
 
-// Init ...
 func (p *TestPlugin) Init(jobname, filename string, xl *zap.SugaredLogger) {
 	p.JobName = jobname
 	p.FileName = filename
-	// SetLogger ...
 	p.Log = xl
 }
 
-// Type ...
 func (p *TestPlugin) Type() config.TaskType {
 	return p.Name
 }
 
-// Status ...
 func (p *TestPlugin) Status() config.Status {
 	return p.Task.TaskStatus
 }
 
-// SetStatus ...
 func (p *TestPlugin) SetStatus(status config.Status) {
 	p.Task.TaskStatus = status
 }
 
-// TaskTimeout ...
 func (p *TestPlugin) TaskTimeout() int {
 	if p.Task.Timeout == 0 {
 		p.Task.Timeout = TestingV2TaskTimeout
@@ -103,10 +96,49 @@ func (p *TestPlugin) TaskTimeout() int {
 }
 
 func (p *TestPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineCtx *task.PipelineCtx, serviceName string) {
+	if p.Task.CacheEnable && !pipelineTask.ConfigPayload.ResetCache {
+		pipelineCtx.CacheEnable = true
+		pipelineCtx.Cache = p.Task.Cache
+		pipelineCtx.CacheDirType = p.Task.CacheDirType
+		pipelineCtx.CacheUserDir = p.Task.CacheUserDir
+	} else {
+		pipelineCtx.CacheEnable = false
+	}
+
+	// TODO: Since the namespace field has been used continuously since v1.10.0, the processing logic related to namespace needs to
+	// be deleted in v1.11.0.
 	p.KubeNamespace = pipelineTask.ConfigPayload.Test.KubeNamespace
-	// 重置错误信息
+	if p.Task.Namespace != "" {
+		p.KubeNamespace = p.Task.Namespace
+		kubeClient, err := kubeclient.GetKubeClient(pipelineTask.ConfigPayload.HubServerAddr, p.Task.ClusterID)
+		if err != nil {
+			msg := fmt.Sprintf("failed to get kube client: %s", err)
+			p.Log.Error(msg)
+			p.Task.TaskStatus = config.StatusFailed
+			p.Task.Error = msg
+			return
+		}
+		p.kubeClient = kubeClient
+	}
+	// not local cluster
+	replaceDindServer := "." + DindServer
+	if p.Task.ClusterID != "" && p.Task.ClusterID != setting.LocalClusterID {
+		if strings.Contains(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace) {
+			// replace namespace only
+			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace, KoderoverAgentNamespace, 1)
+		} else {
+			// add namespace
+			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, replaceDindServer, replaceDindServer+"."+KoderoverAgentNamespace, 1)
+		}
+	} else if p.Task.ClusterID == "" || p.Task.ClusterID == setting.LocalClusterID {
+		if !strings.Contains(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace) {
+			// add namespace
+			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, replaceDindServer, replaceDindServer+"."+pipelineTask.ConfigPayload.Build.KubeNamespace, 1)
+		}
+	}
+	pipelineCtx.DockerHost = pipelineTask.DockerHost
+	// Reset error message.
 	p.Task.Error = ""
-	// 获取测试相关的namespace
 	var linkedNamespace string
 	var envName string
 	if pipelineTask.Type == config.SingleType {
@@ -200,7 +232,7 @@ func (p *TestPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 
 	// search namespace should also include desired namespace
 	job, err := buildJobWithLinkedNs(
-		p.Type(), jobImage, p.JobName, serviceName, p.Task.ResReq, pipelineCtx, pipelineTask, p.Task.Registries,
+		p.Type(), jobImage, p.JobName, serviceName, p.Task.ClusterID, pipelineTask.ConfigPayload.Test.KubeNamespace, p.Task.ResReq, p.Task.ResReqSpec, pipelineCtx, pipelineTask, p.Task.Registries,
 		p.KubeNamespace,
 		linkedNamespace,
 	)
@@ -224,7 +256,7 @@ func (p *TestPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 	}
 
 	// 将集成到KodeRover的私有镜像仓库的访问权限设置到namespace中
-	if err := createOrUpdateRegistrySecrets(p.KubeNamespace, p.Task.Registries, p.kubeClient); err != nil {
+	if err := createOrUpdateRegistrySecrets(p.KubeNamespace, pipelineTask.ConfigPayload.RegistryID, p.Task.Registries, p.kubeClient); err != nil {
 		p.Log.Errorf("create secret error: %v", err)
 	}
 	if err := updater.CreateJob(job, p.kubeClient); err != nil {
@@ -236,13 +268,11 @@ func (p *TestPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 	}
 }
 
-// Wait ...
 func (p *TestPlugin) Wait(ctx context.Context) {
 	status := waitJobEndWithFile(ctx, p.TaskTimeout(), p.KubeNamespace, p.JobName, true, p.kubeClient, p.Log)
 	p.SetStatus(status)
 }
 
-// Complete ...
 func (p *TestPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serviceName string) {
 	pipelineName := pipelineTask.PipelineName
 	pipelineTaskID := pipelineTask.TaskID
@@ -257,16 +287,18 @@ func (p *TestPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serv
 
 	// 日志保存失败与否都清理job
 	defer func() {
-		if p.Task.TaskStatus == config.StatusCancelled || p.Task.TaskStatus == config.StatusTimeout {
-			if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
-				p.Log.Error(err)
-				p.Task.Error = err.Error()
-			}
-			return
+		if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+			p.Log.Error(err)
+			p.Task.Error = err.Error()
 		}
+		if err := ensureDeleteConfigMap(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+			p.Log.Error(err)
+			p.Task.Error = err.Error()
+		}
+		return
 	}()
 
-	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.FileName, jobLabel, p.kubeClient)
+	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.Task.ClusterID, p.FileName, jobLabel, p.kubeClient)
 	if err != nil {
 		p.Log.Error(err)
 		p.Task.Error = err.Error()
@@ -462,7 +494,6 @@ func (p *TestPlugin) IsTaskDone() bool {
 	return false
 }
 
-// IsTaskFailed ...
 func (p *TestPlugin) IsTaskFailed() bool {
 	if p.Task.TaskStatus == config.StatusFailed || p.Task.TaskStatus == config.StatusTimeout || p.Task.TaskStatus == config.StatusCancelled {
 		return true
@@ -470,22 +501,18 @@ func (p *TestPlugin) IsTaskFailed() bool {
 	return false
 }
 
-// SetStartTime ...
 func (p *TestPlugin) SetStartTime() {
 	p.Task.StartTime = time.Now().Unix()
 }
 
-// SetEndTime ...
 func (p *TestPlugin) SetEndTime() {
 	p.Task.EndTime = time.Now().Unix()
 }
 
-// IsTaskEnabled ..
 func (p *TestPlugin) IsTaskEnabled() bool {
 	return p.Task.Enabled
 }
 
-// ResetError ...
 func (p *TestPlugin) ResetError() {
 	p.Task.Error = ""
 }

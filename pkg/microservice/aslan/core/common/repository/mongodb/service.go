@@ -60,6 +60,10 @@ type ServiceListOption struct {
 	NotInServices  []*templatemodels.ServiceInfo
 }
 
+type ServiceAggregateResult struct {
+	ServiceID primitive.ObjectID `bson:"service_id"`
+}
+
 type ServiceColl struct {
 	*mongo.Collection
 
@@ -253,6 +257,27 @@ func (c *ServiceColl) Create(args *models.Service) error {
 	return err
 }
 
+func (c *ServiceColl) UpdateServiceHealthCheckStatus(args *models.Service) error {
+	// avoid panic issue
+	if args == nil {
+		return errors.New("nil ServiceTmplObject")
+	}
+	args.ProductName = strings.TrimSpace(args.ProductName)
+	args.ServiceName = strings.TrimSpace(args.ServiceName)
+
+	query := bson.M{"product_name": args.ProductName, "service_name": args.ServiceName, "revision": args.Revision}
+
+	changeMap := bson.M{
+		"create_by":    args.CreateBy,
+		"create_time":  time.Now().Unix(),
+		"env_configs":  args.EnvConfigs,
+		"env_statuses": args.EnvStatuses,
+	}
+	change := bson.M{"$set": changeMap}
+	_, err := c.UpdateOne(context.TODO(), query, change)
+	return err
+}
+
 func (c *ServiceColl) Update(args *models.Service) error {
 	// avoid panic issue
 	if args == nil {
@@ -408,6 +433,61 @@ func (c *ServiceColl) ListAllRevisions() ([]*models.Service, error) {
 	return resp, err
 }
 
+func (c *ServiceColl) ListMaxRevisionsByProject(serviceName, serviceType string) ([]*models.Service, error) {
+
+	pipeline := []bson.M{
+		{
+			"$match": bson.M{
+				"status":       bson.M{"$ne": setting.ProductStatusDeleting},
+				"service_name": serviceName,
+				"type":         serviceType,
+			},
+		},
+		{
+			"$group": bson.M{
+				"_id": bson.M{
+					"product_name": "$product_name",
+					"service_name": "$service_name",
+				},
+				"revision":   bson.M{"$max": "$revision"},
+				"service_id": bson.M{"$last": "$_id"},
+			},
+		},
+	}
+
+	cursor, err := c.Aggregate(context.TODO(), pipeline)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]*ServiceAggregateResult, 0)
+	if err := cursor.All(context.TODO(), &res); err != nil {
+		return nil, err
+	}
+
+	var ids []primitive.ObjectID
+	for _, service := range res {
+		ids = append(ids, service.ServiceID)
+	}
+
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	var resp []*models.Service
+	query := bson.M{"_id": bson.M{"$in": ids}}
+	cursor, err = c.Collection.Find(context.TODO(), query)
+	if err != nil {
+		return nil, err
+	}
+	err = cursor.All(context.TODO(), &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp, nil
+}
+
 func (c *ServiceColl) ListMaxRevisions(opt *ServiceListOption) ([]*models.Service, error) {
 	preMatch := bson.M{"status": bson.M{"$ne": setting.ProductStatusDeleting}}
 	postMatch := bson.M{}
@@ -464,12 +544,15 @@ func (c *ServiceColl) ListMaxRevisions(opt *ServiceListOption) ([]*models.Servic
 }
 
 func (c *ServiceColl) Count(productName string) (int, error) {
+	match := bson.M{
+		"status": bson.M{"$ne": setting.ProductStatusDeleting},
+	}
+	if productName != "" {
+		match["product_name"] = productName
+	}
 	pipeline := []bson.M{
 		{
-			"$match": bson.M{
-				"product_name": productName,
-				"status":       bson.M{"$ne": setting.ProductStatusDeleting},
-			},
+			"$match": match,
 		},
 		{
 			"$group": bson.M{

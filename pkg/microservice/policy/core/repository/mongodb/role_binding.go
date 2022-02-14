@@ -26,6 +26,7 @@ import (
 
 	"github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/policy/core/repository/models"
+	"github.com/koderover/zadig/pkg/tool/log"
 	mongotool "github.com/koderover/zadig/pkg/tool/mongo"
 )
 
@@ -120,10 +121,17 @@ func (c *RoleBindingColl) Delete(name string, projectName string) error {
 	return err
 }
 
-func (c *RoleBindingColl) DeleteMany(names []string, projectName string) error {
-	query := bson.M{"namespace": projectName}
+func (c *RoleBindingColl) DeleteMany(names []string, projectName string, userID string) error {
+	query := bson.M{}
+	if projectName != "" {
+		query["namespace"] = projectName
+	}
 	if len(names) > 0 {
 		query["name"] = bson.M{"$in": names}
+	}
+
+	if userID != "" {
+		query = bson.M{"subjects.uid": userID}
 	}
 	_, err := c.Collection.DeleteMany(context.TODO(), query)
 
@@ -175,7 +183,11 @@ func (c *RoleBindingColl) BulkCreate(objs []*models.RoleBinding) error {
 		ois = append(ois, obj)
 	}
 
-	_, err := c.InsertMany(context.TODO(), ois)
+	res, err := c.InsertMany(context.TODO(), ois)
+	if mongo.IsDuplicateKeyError(err) {
+		log.Warnf("Duplicate key found, inserted IDs is %v", res.InsertedIDs)
+		return nil
+	}
 
 	return err
 }

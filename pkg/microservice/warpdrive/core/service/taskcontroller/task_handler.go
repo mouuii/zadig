@@ -45,7 +45,6 @@ var (
 	xl           *zap.SugaredLogger
 )
 
-// ExecHandler ...
 // Sender: sender to send ack/notification
 // TaskPlugins: registered task plugin initiators to initiate specific plugin to execute task
 type ExecHandler struct {
@@ -53,10 +52,8 @@ type ExecHandler struct {
 	TaskPlugins map[config.TaskType]plugins.Initiator
 }
 
-// CancelHandler ...
 type CancelHandler struct{}
 
-// HandleMessage ...
 // Message handler to handle task execution message
 func (h *ExecHandler) HandleMessage(message *nsq.Message) error {
 	defer func() {
@@ -337,7 +334,7 @@ func (h *ExecHandler) runStage(stagePosition int, stage *task.Stage) {
 func (h *ExecHandler) execute(ctx context.Context, pipelineTask *task.Task, pipelineCtx *task.PipelineCtx, xl *zap.SugaredLogger) {
 	xl.Info("start pipeline task executor...")
 	// 如果是pipeline 1.0， 先将subtasks进行transform，转化为stages结构
-	if pipelineTask.Type == config.SingleType || pipelineTask.Type == "" {
+	if pipelineTask.Type == config.SingleType || pipelineTask.Type == "" || pipelineTask.Type == config.WorkflowTypeV3 {
 		err := transformToStages(pipelineTask, xl)
 		// 初始化出错时，直接返回pipeline状态错误
 		if err != nil {
@@ -358,8 +355,29 @@ func (h *ExecHandler) execute(ctx context.Context, pipelineTask *task.Task, pipe
 		}
 	}
 
+	updatePipelineStatus(pipelineTask, xl)
+	deployStageStatus := config.StatusInit
+	testStageStatus := config.StatusInit
 	for stagePosition, stage := range pipelineTask.Stages {
+		if stage.TaskType == config.TaskDeploy || stage.TaskType == config.TaskArtifact {
+			deployStageStatus = stage.Status
+		} else if stage.TaskType == config.TaskTestingV2 {
+			testStageStatus = stage.Status
+		}
 		if stage.AfterAll {
+			if stage.TaskType == config.TaskResetImage {
+				switch pipelineTask.ResetImagePolicy {
+				case setting.ResetImagePolicyTaskCompleted, setting.ResetImagePolicyTaskCompletedOrder:
+				case setting.ResetImagePolicyDeployFailed:
+					if deployStageStatus == config.StatusInit || (deployStageStatus != config.StatusFailed && deployStageStatus != config.StatusCancelled && deployStageStatus != config.StatusTimeout) {
+						continue
+					}
+				case setting.ResetImagePolicyTestFailed:
+					if testStageStatus == config.StatusInit || (testStageStatus != config.StatusFailed && testStageStatus != config.StatusCancelled && testStageStatus != config.StatusTimeout) {
+						continue
+					}
+				}
+			}
 			h.runStage(stagePosition, stage)
 		}
 	}
@@ -411,6 +429,12 @@ func (h *ExecHandler) executeTask(taskCtx context.Context, plugin plugins.TaskPl
 	} else if pipelineTask.Type == config.ServiceType {
 		fileName = strings.Replace(strings.ToLower(fmt.Sprintf("%s-%s-%d-%s-%s", config.ServiceType, pipelineTask.PipelineName, pipelineTask.TaskID, plugin.Type(), servicename)),
 			"_", "-", -1)
+	} else if pipelineTask.Type == config.WorkflowTypeV3 {
+		fileName = strings.Replace(strings.ToLower(fmt.Sprintf("%s-%s-%d-%s-%s", config.WorkflowTypeV3, pipelineTask.PipelineName, pipelineTask.TaskID, plugin.Type(), fmt.Sprintf("%s-job", pipelineTask.PipelineName))),
+			"_", "-", -1)
+	} else if pipelineTask.Type == config.ArtifactType {
+		fileName = strings.Replace(strings.ToLower(fmt.Sprintf("%s-%s-%d-%s", config.ArtifactType, pipelineTask.PipelineName, pipelineTask.TaskID, plugin.Type())),
+			"_", "-", -1)
 	}
 	plugin.Init(jobName, fileName, xl)
 
@@ -454,7 +478,7 @@ func (h *ExecHandler) executeTask(taskCtx context.Context, plugin plugins.TaskPl
 	xl.Info("start to call plugin.Run")
 	// 如果是并行跑，用servicename来区分不同的workspace
 	runCtx := *pipelineCtx
-	if pipelineTask.Type == config.WorkflowType {
+	if pipelineTask.Type == config.WorkflowType || pipelineTask.Type == config.WorkflowTypeV3 {
 		runCtx.Workspace = fmt.Sprintf("%s/%s", pipelineCtx.Workspace, servicename)
 	}
 	// 运行 SubTask, 如果需要异步，请在方法内实现
@@ -496,7 +520,6 @@ func (h *ExecHandler) executeTask(taskCtx context.Context, plugin plugins.TaskPl
 }
 
 func Logger(pipelineTask *task.Task) *zap.SugaredLogger {
-	// 初始化Logger
 	l := log.Logger()
 	if pipelineTask != nil {
 		l.With(zap.String(setting.RequestID, pipelineTask.ReqID))

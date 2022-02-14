@@ -22,13 +22,14 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/koderover/zadig/pkg/config"
+	systemmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/system/repository/models"
+	systemservice "github.com/koderover/zadig/pkg/microservice/aslan/core/system/service"
 	"github.com/koderover/zadig/pkg/setting"
-	"github.com/koderover/zadig/pkg/shared/client/aslan"
 	"github.com/koderover/zadig/pkg/util/ginzap"
 )
 
@@ -47,6 +48,7 @@ type jwtClaims struct {
 	UID  string `json:"uid"`
 }
 
+// TODO: We need to implement a `context.Context` that conforms to the golang standard library.
 func NewContext(c *gin.Context) *Context {
 	logger := ginzap.WithContext(c).Sugar()
 	var claims jwtClaims
@@ -66,6 +68,20 @@ func NewContext(c *gin.Context) *Context {
 		Logger:    ginzap.WithContext(c).Sugar(),
 		RequestID: c.GetString(setting.RequestID),
 	}
+}
+
+func GetResourcesInHeader(c *gin.Context) ([]string, bool) {
+	_, ok := c.Request.Header[setting.ResourcesHeader]
+	if !ok {
+		return nil, false
+	}
+
+	res := c.GetHeader(setting.ResourcesHeader)
+	if res == "" {
+		return nil, true
+	}
+
+	return strings.Split(res, ","), true
 }
 
 func getUserFromJWT(token string) (jwtClaims, error) {
@@ -104,11 +120,21 @@ func JSONResponse(c *gin.Context, ctx *Context) {
 
 // InsertOperationLog 插入操作日志
 func InsertOperationLog(c *gin.Context, username, productName, method, function, detail, requestBody string, logger *zap.SugaredLogger) {
-	operationLogID, err := aslan.New(config.AslanServiceAddress()).AddAuditLog(username, productName, method, function, detail, requestBody, logger)
+	req := &systemmodels.OperationLog{
+		Username:    username,
+		ProductName: productName,
+		Method:      method,
+		Function:    function,
+		Name:        detail,
+		RequestBody: requestBody,
+		Status:      0,
+		CreatedAt:   time.Now().Unix(),
+	}
+	operationLogID, err := systemservice.InsertOperation(req, logger)
 	if err != nil {
 		logger.Errorf("InsertOperation err:%v", err)
 	}
-	c.Set("operationLogID", operationLogID)
+	c.Set("operationLogID", operationLogID.OperationLogID)
 }
 
 // responseHelper recursively finds all nil slice in the given interface,

@@ -173,7 +173,7 @@ func prEventToPipelineTasks(event *github.PullRequestEvent, requestID string, lo
 		commitMessage = *event.PullRequest.Title
 	)
 
-	address, err := util.GetAddress(event.Repo.GetURL())
+	address, err := util.GetAddress(event.Repo.GetHTMLURL())
 	if err != nil {
 		log.Errorf("GetAddress failed, url: %s, err: %s", event.Repo.GetURL(), err)
 		return nil, err
@@ -381,6 +381,35 @@ func pushEventCommitsFiles(e *github.PushEvent) []string {
 	return files
 }
 
+func ProcessGithubWebHookForTest(payload []byte, req *http.Request, requestID string, log *zap.SugaredLogger) error {
+	hookType := github.WebHookType(req)
+	if hookType == "integration_installation" || hookType == "installation" || hookType == "ping" {
+		return nil
+	}
+
+	err := validateSecret(payload, []byte(gitservice.GetHookSecret()), req)
+	if err != nil {
+		return err
+	}
+
+	event, err := github.ParseWebHook(github.WebHookType(req), payload)
+	if err != nil {
+		return err
+	}
+
+	switch et := event.(type) {
+	case *github.PullRequestEvent, *github.PushEvent, *github.CreateEvent:
+		if err = TriggerTestByGithubEvent(et, requestID, log); err != nil {
+			log.Errorf("TriggerTestByGithubEvent error: %s", err)
+			return e.ErrGithubWebHook.AddErr(err)
+		}
+	default:
+		log.Warn("Unsupported event type")
+		return nil
+	}
+	return nil
+}
+
 func ProcessGithubWebHook(payload []byte, req *http.Request, requestID string, log *zap.SugaredLogger) error {
 	forwardedProto := req.Header.Get("X-Forwarded-Proto")
 	forwardedHost := req.Header.Get("X-Forwarded-Host")
@@ -442,6 +471,12 @@ func ProcessGithubWebHook(payload []byte, req *http.Request, requestID string, l
 			log.Infof("pushEventToPipelineTasks error: %v", err)
 			return e.ErrGithubWebHook.AddErr(err)
 		}
+	case *github.CreateEvent:
+		err = TriggerWorkflowByGithubEvent(et, baseURI, deliveryID, requestID, log)
+		if err != nil {
+			log.Errorf("tagEventToPipelineTasks error: %s", err)
+			return e.ErrGithubWebHook.AddErr(err)
+		}
 	}
 	return nil
 }
@@ -453,9 +488,12 @@ type AutoCancelOpt struct {
 	MainRepo       *commonmodels.MainHookRepo
 	WorkflowArgs   *commonmodels.WorkflowTaskArgs
 	TestArgs       *commonmodels.TestTaskArgs
+	IsYaml         bool
+	AutoCancel     bool
+	YamlHookPath   string
 }
 
-func getProductTargetMap(prod *commonmodels.Product) map[string][]commonmodels.DeployEnv {
+func getProductTargetMap(prod *commonmodels.Product, isYaml bool) map[string][]commonmodels.DeployEnv {
 	resp := make(map[string][]commonmodels.DeployEnv)
 	if prod.Source == setting.SourceFromExternal {
 		services, _ := commonrepo.NewServiceColl().ListExternalWorkloadsBy(prod.ProductName, prod.EnvName)
@@ -467,6 +505,9 @@ func getProductTargetMap(prod *commonmodels.Product) map[string][]commonmodels.D
 				resp[target] = append(resp[target], deployEnv)
 			}
 		}
+		return resp
+	}
+	if isYaml {
 		return resp
 	}
 	for _, services := range prod.Services {

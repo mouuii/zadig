@@ -39,10 +39,11 @@ type ErrorWriter func(rw http.ResponseWriter, req *http.Request, code int, err e
 
 func DefaultErrorWriter(rw http.ResponseWriter, req *http.Request, code int, err error) {
 	rw.WriteHeader(code)
-	rw.Write([]byte(err.Error()))
+	_, errWrite := rw.Write([]byte(err.Error()))
+	if errWrite != nil {
+		logrus.Warnf("Failed to write error: %s", errWrite)
+	}
 }
-
-type transportGetter func() (http.RoundTripper, error)
 
 type Server struct {
 	PeerID                  string
@@ -127,10 +128,6 @@ func (r *Server) GetTransport(clusterCaCert string, clientKey string) (http.Roun
 
 	r.Lock()
 	defer r.Unlock()
-
-	if r.httpTransport != nil && r.caCert == clusterCaCert {
-		return r.httpTransport, nil
-	}
 
 	transport := &http.Transport{}
 	if clusterCaCert != "" {

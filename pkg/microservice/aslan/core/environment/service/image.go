@@ -17,35 +17,26 @@ limitations under the License.
 package service
 
 import (
-	"bytes"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	helmclient "github.com/mittwald/go-helm-client"
 	"go.uber.org/zap"
-	"helm.sh/helm/v3/pkg/strvals"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 
+	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	templatemodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
 	"github.com/koderover/zadig/pkg/setting"
+	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	helmtool "github.com/koderover/zadig/pkg/tool/helmclient"
-	"github.com/koderover/zadig/pkg/tool/kube/getter"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	"github.com/koderover/zadig/pkg/tool/log"
-	"github.com/koderover/zadig/pkg/util"
-	"github.com/koderover/zadig/pkg/util/converter"
-	yamlutil "github.com/koderover/zadig/pkg/util/yaml"
 )
 
 type UpdateContainerImageArgs struct {
@@ -56,37 +47,6 @@ type UpdateContainerImageArgs struct {
 	Name          string `json:"name"`
 	ContainerName string `json:"container_name"`
 	Image         string `json:"image"`
-}
-
-const (
-	imageUrlParseRegexString = `(?P<repo>.+/)?(?P<image>[^:]+){1}(:)?(?P<tag>.+)?`
-)
-
-var (
-	imageParseRegex = regexp.MustCompile(imageUrlParseRegexString)
-)
-
-func getHelmServiceName(namespace, resType, resName string, kubeClient client.Client) (string, error) {
-	res := &unstructured.Unstructured{}
-	res.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
-		Version: "v1",
-		Kind:    resType,
-	})
-	found, err := getter.GetResourceInCache(namespace, resName, res, kubeClient)
-	if err != nil {
-		return "", fmt.Errorf("failed to find resource %s, type %s, err %s", resName, resType, err.Error())
-	}
-	if !found {
-		return "", fmt.Errorf("failed to find resource %s, type %s", resName, resType)
-	}
-	annotation := res.GetAnnotations()
-	if len(annotation) > 0 {
-		if chartRelease, ok := annotation[setting.HelmReleaseNameAnnotation]; ok {
-			return util.ExtraServiceName(chartRelease, namespace), nil
-		}
-	}
-	return "", fmt.Errorf("failed to get annotation from resource %s, type %s", resName, resType)
 }
 
 func getValidMatchData(spec *models.ImagePathSpec) map[string]string {
@@ -101,81 +61,6 @@ func getValidMatchData(spec *models.ImagePathSpec) map[string]string {
 		ret[setting.PathSearchComponentTag] = spec.Tag
 	}
 	return ret
-}
-
-// parse image url to map: repo=>xxx/xx/xx image=>xx tag=>xxx
-func resolveImageUrl(imageUrl string) map[string]string {
-	subMatchAll := imageParseRegex.FindStringSubmatch(imageUrl)
-	result := make(map[string]string)
-	exNames := imageParseRegex.SubexpNames()
-	for i, matchedStr := range subMatchAll {
-		if i != 0 && matchedStr != "" && matchedStr != ":" {
-			result[exNames[i]] = matchedStr
-		}
-	}
-	return result
-}
-
-// replace image defines in yaml by new version
-func replaceImage(sourceYaml string, imageValuesMap map[string]interface{}) (string, error) {
-	nestedMap, err := converter.Expand(imageValuesMap)
-	if err != nil {
-		return "", err
-	}
-	bs, err := yaml.Marshal(nestedMap)
-	if err != nil {
-		return "", err
-	}
-	mergedBs, err := yamlutil.Merge([][]byte{[]byte(sourceYaml), bs})
-	if err != nil {
-		return "", err
-	}
-	return string(mergedBs), nil
-}
-
-// AssignImageData assign image url data into match data
-// matchData: image=>absolute-path repo=>absolute-path tag=>absolute-path
-// return: absolute-image-path=>image-value  absolute-repo-path=>repo-value absolute-tag-path=>tag-value
-func assignImageData(imageUrl string, matchData map[string]string) (map[string]interface{}, error) {
-	ret := make(map[string]interface{})
-	// total image url assigned into one single value
-	if len(matchData) == 1 {
-		for _, v := range matchData {
-			ret[v] = imageUrl
-		}
-		return ret, nil
-	}
-
-	resolvedImageUrl := resolveImageUrl(imageUrl)
-
-	// image url assigned into repo/image+tag
-	if len(matchData) == 3 {
-		ret[matchData[setting.PathSearchComponentRepo]] = strings.TrimSuffix(resolvedImageUrl[setting.PathSearchComponentRepo], "/")
-		ret[matchData[setting.PathSearchComponentImage]] = resolvedImageUrl[setting.PathSearchComponentImage]
-		ret[matchData[setting.PathSearchComponentTag]] = resolvedImageUrl[setting.PathSearchComponentTag]
-		return ret, nil
-	}
-
-	if len(matchData) == 2 {
-		// image url assigned into repo/image + tag
-		if tagPath, ok := matchData[setting.PathSearchComponentTag]; ok {
-			ret[tagPath] = resolvedImageUrl[setting.PathSearchComponentTag]
-			for k, imagePath := range matchData {
-				if k == setting.PathSearchComponentTag {
-					continue
-				}
-				ret[imagePath] = fmt.Sprintf("%s%s", resolvedImageUrl[setting.PathSearchComponentRepo], resolvedImageUrl[setting.PathSearchComponentImage])
-				break
-			}
-			return ret, nil
-		}
-		// image url assigned into repo + image(tag)
-		ret[matchData[setting.PathSearchComponentRepo]] = strings.TrimSuffix(resolvedImageUrl[setting.PathSearchComponentRepo], "/")
-		ret[matchData[setting.PathSearchComponentImage]] = fmt.Sprintf("%s:%s", resolvedImageUrl[setting.PathSearchComponentImage], resolvedImageUrl[setting.PathSearchComponentTag])
-		return ret, nil
-	}
-
-	return nil, fmt.Errorf("match data illegal, expect length: 1-3, actual length: %d", len(matchData))
 }
 
 // prepare necessary data from db
@@ -236,7 +121,7 @@ func prepareData(namespace, serviceName string, containerName string, product *m
 	return
 }
 
-func updateContainerForHelmChart(serviceName, resType, image, containerName string, product *models.Product) error {
+func updateContainerForHelmChart(serviceName, resType, image, containerName string, product *models.Product, cl client.Client) error {
 	var (
 		replaceValuesMap         map[string]interface{}
 		replacedValuesYaml       string
@@ -256,13 +141,13 @@ func updateContainerForHelmChart(serviceName, resType, image, containerName stri
 	targetContainer.Image = image
 
 	// prepare image replace info
-	replaceValuesMap, err = assignImageData(image, getValidMatchData(targetContainer.ImagePath))
+	replaceValuesMap, err = commonservice.AssignImageData(image, getValidMatchData(targetContainer.ImagePath))
 	if err != nil {
 		return fmt.Errorf("failed to pase image uri %s/%s, err %s", namespace, serviceName, err.Error())
 	}
 
 	// replace image into service's values.yaml
-	replacedValuesYaml, err = replaceImage(targetChart.ValuesYaml, replaceValuesMap)
+	replacedValuesYaml, err = commonservice.ReplaceImage(targetChart.ValuesYaml, replaceValuesMap)
 	if err != nil {
 		return fmt.Errorf("failed to replace image uri %s/%s, err %s", namespace, serviceName, err.Error())
 
@@ -281,7 +166,7 @@ func updateContainerForHelmChart(serviceName, resType, image, containerName stri
 	}
 
 	// replace image into final merged values.yaml
-	replacedMergedValuesYaml, err = replaceImage(mergedValuesYaml, replaceValuesMap)
+	replacedMergedValuesYaml, err = commonservice.ReplaceImage(mergedValuesYaml, replaceValuesMap)
 	if err != nil {
 		return err
 	}
@@ -296,7 +181,7 @@ func updateContainerForHelmChart(serviceName, resType, image, containerName stri
 	}
 
 	// when replace image, should not wait
-	err = installOrUpgradeHelmChartWithValues(namespace, replacedMergedValuesYaml, targetChart, serviceObj, 0, helmClient)
+	err = installOrUpgradeHelmChartWithValues(namespace, replacedMergedValuesYaml, targetChart, serviceObj, false, helmClient, cl)
 	if err != nil {
 		return err
 	}
@@ -321,9 +206,24 @@ func UpdateContainerImage(requestID string, args *UpdateContainerImageArgs, log 
 	}
 
 	namespace := product.Namespace
-	kubeClient, err := kube.GetKubeClient(product.ClusterID)
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), product.ClusterID)
 	if err != nil {
 		return e.ErrUpdateConainterImage.AddErr(err)
+	}
+	// aws secrets needs to be refreshed
+	regs, err := commonservice.ListRegistryNamespaces(true, log)
+	if err != nil {
+		log.Errorf("Failed to get registries to update container images, the error is: %s", err)
+		return err
+	}
+	for _, reg := range regs {
+		if reg.RegProvider == config.RegistryTypeAWS {
+			if err := kube.CreateOrUpdateRegistrySecret(namespace, reg, kubeClient); err != nil {
+				retErr := fmt.Errorf("failed to update pull secret for registry: %s, the error is: %s", reg.ID.Hex(), err)
+				log.Errorf("%s\n", retErr.Error())
+				return retErr
+			}
+		}
 	}
 
 	eventStart := time.Now().Unix()
@@ -334,11 +234,11 @@ func UpdateContainerImage(requestID string, args *UpdateContainerImageArgs, log 
 
 	// update service in helm way
 	if product.Source == setting.HelmDeployType {
-		serviceName, err := getHelmServiceName(namespace, args.Type, args.Name, kubeClient)
+		serviceName, err := commonservice.GetHelmServiceName(namespace, args.Type, args.Name, kubeClient)
 		if err != nil {
 			return e.ErrUpdateConainterImage.AddErr(err)
 		}
-		err = updateContainerForHelmChart(serviceName, args.Type, args.Image, args.ContainerName, product)
+		err = updateContainerForHelmChart(serviceName, args.Type, args.Image, args.ContainerName, product, kubeClient)
 		if err != nil {
 			return e.ErrUpdateConainterImage.AddErr(err)
 		}
@@ -376,40 +276,4 @@ func UpdateContainerImage(requestID string, args *UpdateContainerImageArgs, log 
 		}
 	}
 	return nil
-}
-
-func updateImageTagInValues(valuesYaml []byte, repo, newTag string) ([]byte, error) {
-	if !bytes.Contains(valuesYaml, []byte(repo)) {
-		return nil, nil
-	}
-
-	valuesMap := map[string]interface{}{}
-	if err := yaml.Unmarshal(valuesYaml, &valuesMap); err != nil {
-		return nil, err
-	}
-
-	valuesFlatMap, err := converter.Flatten(valuesMap)
-	if err != nil {
-		return nil, err
-	}
-
-	var matchingKey string
-	for k, v := range valuesFlatMap {
-		if val, ok := v.(string); ok && repo == val {
-			matchingKey = k
-		}
-	}
-	if matchingKey == "" {
-		return nil, fmt.Errorf("key is not found for value %s in map %v", repo, valuesFlatMap)
-	}
-
-	newKey := strings.Replace(matchingKey, ".repository", ".tag", 1)
-	if newKey == matchingKey {
-		return nil, fmt.Errorf("field repository is not found in key %s", matchingKey)
-	}
-	if err := strvals.ParseInto(fmt.Sprintf("%s=%s", newKey, newTag), valuesMap); err != nil {
-		return nil, err
-	}
-
-	return yaml.Marshal(valuesMap)
 }

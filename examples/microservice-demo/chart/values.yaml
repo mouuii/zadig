@@ -6,14 +6,14 @@ ingressClass: kr-nginx
 Backend:
   replicaCount: 1
   image:
-    repository: ccr.ccs.tencentyun.com/koderover-public/backend
-    tag: "latest"
+    repository: ccr.ccs.tencentyun.com/trial/backend
+    tag: "20220214-demo3"
 
 Frontend:
   replicaCount: 1
   image: 
-    repository: ccr.ccs.tencentyun.com/koderover-public/frontend
-    tag: "latest"
+    repository: ccr.ccs.tencentyun.com/trial/frontend
+    tag: "202120214-demo1"
 
 domain: demo.domain.com
 port: 20219

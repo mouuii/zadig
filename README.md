@@ -41,9 +41,11 @@ Zadig is non-invasive, it does not exclude any of your existing development proc
 > Our vision is: Developer + Zadig = Business success
 
 
-The architecture is as follows:
+The business architecture is as follows:
 
 ![Business Architecture](./Zadig-Business-Architecture.jpg)
+
+For more details about system architecture, see [Zadig System Architecture Overview](System-Architecture-Overview.md).
 
 The Highlighted Features:
 
@@ -76,7 +78,7 @@ The Highlighted Features:
 
 ### How to use?
 
-Please follow [Quick Start](https://docs.koderover.com/zadig/quick-start/try-out-install)
+Please follow [Quick Start](https://docs.koderover.com/zadig/quick-start/try-out-install/)
 
 ### Bootcamps
 

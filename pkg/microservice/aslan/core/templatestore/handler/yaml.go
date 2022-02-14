@@ -1,9 +1,26 @@
+/*
+Copyright 2021 The KodeRover Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package handler
 
 import (
 	"github.com/gin-gonic/gin"
+	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 
-	templateservice "github.com/koderover/zadig/pkg/microservice/aslan/core/templatestore/service"
+	templateservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/template"
 	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
 )
 
@@ -41,7 +58,7 @@ type listYamlQuery struct {
 }
 
 type ListYamlResp struct {
-	SystemVariables []*templateservice.Variable       `json:"system_variables"`
+	SystemVariables []*commonmodels.ChartVariable     `json:"system_variables"`
 	YamlTemplates   []*templateservice.YamlListObject `json:"yaml_template"`
 	Total           int                               `json:"total"`
 }
@@ -98,6 +115,10 @@ func GetYamlTemplateVariables(c *gin.Context) {
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
 	req := &getYamlTemplateVariablesReq{}
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = err
+		return
+	}
 
 	ctx.Resp, ctx.Err = templateservice.GetYamlVariables(req.Content, ctx.Logger)
 }

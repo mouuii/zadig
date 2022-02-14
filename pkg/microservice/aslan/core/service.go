@@ -36,7 +36,6 @@ import (
 	projecthandler "github.com/koderover/zadig/pkg/microservice/aslan/core/project/handler"
 	systemrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/system/repository/mongodb"
 	systemservice "github.com/koderover/zadig/pkg/microservice/aslan/core/system/service"
-	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/templatestore/repository/mongodb"
 	workflowhandler "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/handler"
 	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
 	testinghandler "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/testing/handler"
@@ -51,7 +50,7 @@ const (
 )
 
 type policyGetter interface {
-	Policies() *policy.Policy
+	Policies() []*policy.Policy
 }
 
 type Controller interface {
@@ -79,8 +78,8 @@ func StartControllers(stopCh <-chan struct{}) {
 }
 
 func registerPolicies() {
-	policyClient := policy.New()
-
+	policyClient := policy.NewWithRetry()
+	var policies []*policy.Policy
 	for _, r := range []policyGetter{
 		new(workflowhandler.Router),
 		new(environmenthandler.Router),
@@ -88,7 +87,11 @@ func registerPolicies() {
 		new(testinghandler.Router),
 		new(deliveryhandler.Router),
 	} {
-		err := policyClient.CreateOrUpdatePolicy(r.Policies())
+		policies = append(policies, r.Policies()...)
+	}
+
+	for _, p := range policies {
+		err := policyClient.CreateOrUpdatePolicy(p)
 		if err != nil {
 			// should not have happened here
 			log.DPanic(err)
@@ -159,6 +162,7 @@ func initDatabase() {
 		template.NewProductColl(),
 		commonrepo.NewBasicImageColl(),
 		commonrepo.NewBuildColl(),
+		commonrepo.NewCallbackRequestColl(),
 		commonrepo.NewCounterColl(),
 		commonrepo.NewCronjobColl(),
 		commonrepo.NewDeliveryActivityColl(),
@@ -201,12 +205,9 @@ func initDatabase() {
 		commonrepo.NewWorkLoadsStatColl(),
 		commonrepo.NewServicesInExternalEnvColl(),
 		commonrepo.NewExternalLinkColl(),
-
-		templaterepo.NewChartColl(),
-		templaterepo.NewDockerfileTemplateColl(),
-
-		templaterepo.NewChartColl(),
-		templaterepo.NewDockerfileTemplateColl(),
+		commonrepo.NewChartColl(),
+		commonrepo.NewDockerfileTemplateColl(),
+		commonrepo.NewProjectClusterRelationColl(),
 
 		systemrepo.NewAnnouncementColl(),
 		systemrepo.NewOperationLogColl(),
@@ -225,6 +226,10 @@ func initDatabase() {
 	// 初始化数据
 	commonrepo.NewInstallColl().InitInstallData(systemservice.InitInstallMap())
 	commonrepo.NewBasicImageColl().InitBasicImageData(systemservice.InitbasicImageInfos())
+
+	if err := commonrepo.NewS3StorageColl().InitData(); err != nil {
+		log.Warnf("Failed to init S3 data: %s", err)
+	}
 }
 
 type indexer interface {

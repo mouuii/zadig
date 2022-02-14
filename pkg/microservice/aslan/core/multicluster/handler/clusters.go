@@ -22,19 +22,23 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/multicluster/service"
 	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
 	e "github.com/koderover/zadig/pkg/tool/errors"
+	"github.com/koderover/zadig/pkg/tool/log"
 )
 
 func ListClusters(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	ctx.Resp, ctx.Err = service.ListClusters(c.Query("clusterType"),
-		ctx.Logger,
-	)
+	clusters, found := internalhandler.GetResourcesInHeader(c)
+	if found && len(clusters) == 0 {
+		ctx.Resp = []*service.K8SCluster{}
+		return
+	}
+
+	ctx.Resp, ctx.Err = service.ListClusters(clusters, c.Query("projectName"), ctx.Logger)
 }
 
 func GetCluster(c *gin.Context) {
@@ -48,7 +52,7 @@ func CreateCluster(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	args := new(commonmodels.K8SCluster)
+	args := new(service.K8SCluster)
 	if err := c.BindJSON(args); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddErr(err)
 		return
@@ -69,14 +73,16 @@ func UpdateCluster(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
-	args := new(commonmodels.K8SCluster)
+	args := new(service.K8SCluster)
 	if err := c.BindJSON(args); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddErr(err)
+		log.Errorf("Failed to bind data: %s", err)
 		return
 	}
 
 	if err := args.Clean(); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddErr(err)
+		log.Errorf("Failed to clean args: %s", err)
 		return
 	}
 

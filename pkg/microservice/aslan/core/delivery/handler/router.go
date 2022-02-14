@@ -30,6 +30,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	{
 		deliveryArtifact.GET("", ListDeliveryArtifacts)
 		deliveryArtifact.GET("/:id", GetDeliveryArtifact)
+		deliveryArtifact.GET("/image", GetDeliveryArtifactIDByImage)
 		deliveryArtifact.POST("", CreateDeliveryArtifacts)
 		deliveryArtifact.POST("/:id", UpdateDeliveryArtifact)
 		deliveryArtifact.POST("/:id/activities", CreateDeliveryActivities)
@@ -37,7 +38,6 @@ func (*Router) Inject(router *gin.RouterGroup) {
 
 	deliveryProduct := router.Group("products")
 	{
-		deliveryProduct.GET("", ListDeliveryProduct)
 		deliveryProduct.GET("/:releaseId", GetProductByDeliveryInfo)
 	}
 
@@ -46,6 +46,14 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		deliveryRelease.GET("/:id", GetDeliveryVersion)
 		deliveryRelease.GET("", ListDeliveryVersion)
 		deliveryRelease.DELETE("/:id", GetProductNameByDelivery, gin2.UpdateOperationLogStatus, DeleteDeliveryVersion)
+
+		deliveryRelease.POST("/helm", CreateHelmDeliveryVersion)
+		deliveryRelease.POST("/helm/global-variables", ApplyDeliveryGlobalVariables)
+		deliveryRelease.GET("/helm/charts", DownloadDeliveryChart)
+		deliveryRelease.GET("/helm/charts/version", GetChartVersionFromRepo)
+		deliveryRelease.GET("/helm/charts/preview", PreviewGetDeliveryChart)
+		deliveryRelease.GET("/helm/charts/filePath", GetDeliveryChartFilePath)
+		deliveryRelease.GET("/helm/charts/fileContent", GetDeliveryChartFileContent)
 	}
 
 	deliveryPackage := router.Group("packages")

@@ -21,8 +21,10 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/policy/core/repository/models"
 	"github.com/koderover/zadig/pkg/microservice/policy/core/repository/mongodb"
+	"github.com/koderover/zadig/pkg/setting"
 )
 
 type RoleBinding struct {
@@ -112,16 +114,13 @@ func DeleteRoleBinding(name string, projectName string, _ *zap.SugaredLogger) er
 	return mongodb.NewRoleBindingColl().Delete(name, projectName)
 }
 
-func DeleteRoleBindings(names []string, projectName string, _ *zap.SugaredLogger) error {
-	if len(names) == 0 {
-		return nil
-	}
+func DeleteRoleBindings(names []string, projectName string, userID string, _ *zap.SugaredLogger) error {
 
-	if names[0] == "*" {
+	if len(names) == 1 && names[0] == "*" {
 		names = []string{}
 	}
 
-	return mongodb.NewRoleBindingColl().DeleteMany(names, projectName)
+	return mongodb.NewRoleBindingColl().DeleteMany(names, projectName, userID)
 }
 
 func createRoleBindingObject(ns string, rb *RoleBinding, logger *zap.SugaredLogger) (*models.RoleBinding, error) {
@@ -138,6 +137,8 @@ func createRoleBindingObject(ns string, rb *RoleBinding, logger *zap.SugaredLogg
 		return nil, fmt.Errorf("role %s not found", rb.Role)
 	}
 
+	ensureRoleBindingName(ns, rb)
+
 	return &models.RoleBinding{
 		Name:      rb.Name,
 		Namespace: ns,
@@ -147,4 +148,17 @@ func createRoleBindingObject(ns string, rb *RoleBinding, logger *zap.SugaredLogg
 			Namespace: role.Namespace,
 		},
 	}, nil
+}
+
+func ensureRoleBindingName(ns string, rb *RoleBinding) {
+	if rb.Name != "" {
+		return
+	}
+
+	nsRole := ns
+	if rb.Public {
+		nsRole = ""
+	}
+
+	rb.Name = config.RoleBindingNameFromUIDAndRole(rb.UID, setting.RoleType(rb.Role), nsRole)
 }

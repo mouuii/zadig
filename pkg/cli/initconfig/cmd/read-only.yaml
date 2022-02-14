@@ -1,4 +1,4 @@
-name: readonly
+name: read-only
 rules:
   - verbs:
       - get_workflow
@@ -9,6 +9,11 @@ rules:
       - get_environment
     resources:
       - Environment
+    kind: resource
+  - verbs:
+      - get_environment
+    resources:
+      - ProductionEnvironment
     kind: resource
   - verbs:
       - get_build

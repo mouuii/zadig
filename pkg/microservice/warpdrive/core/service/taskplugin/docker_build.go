@@ -135,7 +135,6 @@ func (p *DockerBuildPlugin) Run(ctx context.Context, pipelineTask *task.Task, pi
 		//Docker build context
 		DockerBuildCtx: &task.DockerBuildCtx{
 			Source:     p.Task.Source,
-			TemplateID: p.Task.TemplateID,
 			WorkDir:    fmt.Sprintf("%s/%s", pipelineCtx.Workspace, p.Task.WorkDir),
 			DockerFile: fmt.Sprintf("%s/%s", pipelineCtx.Workspace, p.Task.DockerFile),
 			ImageName:  p.Task.Image,
@@ -196,7 +195,7 @@ func (p *DockerBuildPlugin) Run(ctx context.Context, pipelineTask *task.Task, pi
 		return
 	}
 
-	job, err := buildJob(p.Type(), pipelineTask.ConfigPayload.Release.PredatorImage, p.JobName, serviceName, setting.MinRequest, pipelineCtx, pipelineTask, []*task.RegistryNamespace{})
+	job, err := buildJob(p.Type(), pipelineTask.ConfigPayload.Release.PredatorImage, p.JobName, serviceName, "", pipelineTask.ConfigPayload.Build.KubeNamespace, setting.MinRequest, setting.MinRequestSpec, pipelineCtx, pipelineTask, []*task.RegistryNamespace{})
 	if err != nil {
 		msg := fmt.Sprintf("create build job context error: %v", err)
 		p.Log.Error(msg)
@@ -244,7 +243,7 @@ func (p *DockerBuildPlugin) Complete(ctx context.Context, pipelineTask *task.Tas
 	}()
 
 	// 保存实时日志到s3
-	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.FileName, jobLabel, p.kubeClient)
+	err := saveContainerLog(pipelineTask, p.KubeNamespace, "", p.FileName, jobLabel, p.kubeClient)
 	if err != nil {
 		p.Log.Error(err)
 		p.Task.Error = err.Error()

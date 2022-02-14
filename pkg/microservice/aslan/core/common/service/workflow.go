@@ -35,7 +35,7 @@ import (
 )
 
 func DeleteWorkflows(productName, requestID string, log *zap.SugaredLogger) error {
-	workflows, err := mongodb.NewWorkflowColl().List(&mongodb.ListWorkflowOption{ProductName: productName})
+	workflows, err := mongodb.NewWorkflowColl().List(&mongodb.ListWorkflowOption{Projects: []string{productName}})
 	if err != nil {
 		log.Errorf("Workflow.List error: %v", err)
 		return fmt.Errorf("DeleteWorkflows productName %s Workflow.List error: %v", productName, err)
@@ -271,6 +271,17 @@ func toHookSet(hooks interface{}) HookSet {
 					repo:  h.Repo,
 				},
 				codeHostID: h.CodeHostID,
+			})
+		}
+	case []*models.TestingHook:
+		for _, h := range hs {
+			res.Insert(hookItem{
+				hookUniqueID: hookUniqueID{
+					name:  h.MainRepo.Name,
+					owner: h.MainRepo.RepoOwner,
+					repo:  h.MainRepo.RepoName,
+				},
+				codeHostID: h.MainRepo.CodehostID,
 			})
 		}
 	}

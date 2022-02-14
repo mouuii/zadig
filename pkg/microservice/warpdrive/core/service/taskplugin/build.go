@@ -32,13 +32,13 @@ import (
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/config"
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
 	"github.com/koderover/zadig/pkg/setting"
+	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 )
 
 const (
-	// BuildTaskV2Timeout ...
-	BuildTaskV2Timeout = 60 * 60 * 3 // 60 minutes
+	BuildTaskV2Timeout = 60 * 60 * 3 // 180 minutes
 )
 
 // InitializeBuildTaskPlugin to initialize build task plugin, and return reference
@@ -66,7 +66,6 @@ func (p *BuildTaskPlugin) SetAckFunc(ack func()) {
 	p.ack = ack
 }
 
-// Init ...
 func (p *BuildTaskPlugin) Init(jobname, filename string, xl *zap.SugaredLogger) {
 	p.JobName = jobname
 	p.Log = xl
@@ -77,17 +76,14 @@ func (p *BuildTaskPlugin) Type() config.TaskType {
 	return p.Name
 }
 
-// Status ...
 func (p *BuildTaskPlugin) Status() config.Status {
 	return p.Task.TaskStatus
 }
 
-// SetStatus ...
 func (p *BuildTaskPlugin) SetStatus(status config.Status) {
 	p.Task.TaskStatus = status
 }
 
-// TaskTimeout ...
 func (p *BuildTaskPlugin) TaskTimeout() int {
 	if p.Task.Timeout == 0 {
 		p.Task.Timeout = BuildTaskV2Timeout
@@ -106,6 +102,50 @@ func (p *BuildTaskPlugin) SetBuildStatusCompleted(status config.Status) {
 
 //TODO: Binded Archive File logic
 func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineCtx *task.PipelineCtx, serviceName string) {
+	if p.Task.CacheEnable && !pipelineTask.ConfigPayload.ResetCache {
+		pipelineCtx.CacheEnable = true
+		pipelineCtx.Cache = p.Task.Cache
+		pipelineCtx.CacheDirType = p.Task.CacheDirType
+		pipelineCtx.CacheUserDir = p.Task.CacheUserDir
+	} else {
+		pipelineCtx.CacheEnable = false
+	}
+
+	// TODO: Since the namespace field has been used continuously since v1.10.0, the processing logic related to namespace needs to
+	// be deleted in v1.11.0.
+	p.KubeNamespace = pipelineTask.ConfigPayload.Build.KubeNamespace
+	if p.Task.Namespace != "" {
+		p.KubeNamespace = p.Task.Namespace
+		kubeClient, err := kubeclient.GetKubeClient(pipelineTask.ConfigPayload.HubServerAddr, p.Task.ClusterID)
+		if err != nil {
+			msg := fmt.Sprintf("failed to get kube client: %s", err)
+			p.Log.Error(msg)
+			p.Task.TaskStatus = config.StatusFailed
+			p.Task.Error = msg
+			p.SetBuildStatusCompleted(config.StatusFailed)
+			return
+		}
+		p.kubeClient = kubeClient
+	}
+
+	// not local cluster
+	replaceDindServer := "." + DindServer
+	if p.Task.ClusterID != "" && p.Task.ClusterID != setting.LocalClusterID {
+		if strings.Contains(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace) {
+			// replace namespace only
+			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace, KoderoverAgentNamespace, 1)
+		} else {
+			// add namespace
+			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, replaceDindServer, replaceDindServer+"."+KoderoverAgentNamespace, 1)
+		}
+	} else if p.Task.ClusterID == "" || p.Task.ClusterID == setting.LocalClusterID {
+		if !strings.Contains(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace) {
+			// add namespace
+			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, replaceDindServer, replaceDindServer+"."+pipelineTask.ConfigPayload.Build.KubeNamespace, 1)
+		}
+	}
+	pipelineCtx.DockerHost = pipelineTask.DockerHost
+
 	if pipelineTask.Type == config.WorkflowType {
 		envName := pipelineTask.WorkflowArgs.Namespace
 		envNameVar := &task.KeyVal{Key: "ENV_NAME", Value: envName, IsCredential: false}
@@ -143,7 +183,6 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 		p.Task.JobCtx.EnvVars = append(p.Task.JobCtx.EnvVars, artifactKeysVar)
 	}
 
-	p.KubeNamespace = pipelineTask.ConfigPayload.Build.KubeNamespace
 	for _, repo := range p.Task.JobCtx.Builds {
 		repoName := strings.Replace(repo.RepoName, "-", "_", -1)
 		if len(repo.Branch) > 0 {
@@ -230,7 +269,7 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 	}
 
 	//Resource request default value is LOW
-	job, err := buildJob(p.Type(), jobImage, p.JobName, serviceName, p.Task.ResReq, pipelineCtx, pipelineTask, p.Task.Registries)
+	job, err := buildJob(p.Type(), jobImage, p.JobName, serviceName, p.Task.ClusterID, pipelineTask.ConfigPayload.Build.KubeNamespace, p.Task.ResReq, p.Task.ResReqSpec, pipelineCtx, pipelineTask, p.Task.Registries)
 	if err != nil {
 		msg := fmt.Sprintf("create build job context error: %v", err)
 		p.Log.Error(msg)
@@ -252,7 +291,7 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 	}
 
 	// 将集成到KodeRover的私有镜像仓库的访问权限设置到namespace中
-	if err := createOrUpdateRegistrySecrets(p.KubeNamespace, p.Task.Registries, p.kubeClient); err != nil {
+	if err := createOrUpdateRegistrySecrets(p.KubeNamespace, pipelineTask.ConfigPayload.RegistryID, p.Task.Registries, p.kubeClient); err != nil {
 		msg := fmt.Sprintf("create secret error: %v", err)
 		p.Log.Error(msg)
 		p.Task.TaskStatus = config.StatusFailed
@@ -271,7 +310,6 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 	p.Log.Infof("succeed to create build job %s", p.JobName)
 }
 
-// Wait ...
 func (p *BuildTaskPlugin) Wait(ctx context.Context) {
 	status := waitJobEndWithFile(ctx, p.TaskTimeout(), p.KubeNamespace, p.JobName, true, p.kubeClient, p.Log)
 	p.SetBuildStatusCompleted(status)
@@ -301,7 +339,6 @@ func (p *BuildTaskPlugin) Wait(ctx context.Context) {
 	p.SetStatus(status)
 }
 
-// Complete ...
 func (p *BuildTaskPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serviceName string) {
 	jobLabel := &JobLabel{
 		PipelineName: pipelineTask.PipelineName,
@@ -313,16 +350,20 @@ func (p *BuildTaskPlugin) Complete(ctx context.Context, pipelineTask *task.Task,
 
 	// 清理用户取消和超时的任务
 	defer func() {
-		if p.Task.TaskStatus == config.StatusCancelled || p.Task.TaskStatus == config.StatusTimeout {
-			if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
-				p.Log.Error(err)
-				p.Task.Error = err.Error()
-			}
-			return
+		if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+			p.Log.Error(err)
+			p.Task.Error = err.Error()
 		}
+
+		if err := ensureDeleteConfigMap(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+			p.Log.Error(err)
+			p.Task.Error = err.Error()
+		}
+
+		return
 	}()
 
-	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.FileName, jobLabel, p.kubeClient)
+	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.Task.ClusterID, p.FileName, jobLabel, p.kubeClient)
 	if err != nil {
 		p.Log.Error(err)
 		p.Task.Error = err.Error()
@@ -332,22 +373,20 @@ func (p *BuildTaskPlugin) Complete(ctx context.Context, pipelineTask *task.Task,
 	p.Task.LogFile = p.FileName
 }
 
-// SetTask ...
 func (p *BuildTaskPlugin) SetTask(t map[string]interface{}) error {
 	task, err := ToBuildTask(t)
 	if err != nil {
 		return err
 	}
 	p.Task = task
+
 	return nil
 }
 
-// GetTask ...
 func (p *BuildTaskPlugin) GetTask() interface{} {
 	return p.Task
 }
 
-// IsTaskDone ...
 func (p *BuildTaskPlugin) IsTaskDone() bool {
 	if p.Task.TaskStatus != config.StatusCreated && p.Task.TaskStatus != config.StatusRunning {
 		return true
@@ -355,7 +394,6 @@ func (p *BuildTaskPlugin) IsTaskDone() bool {
 	return false
 }
 
-// IsTaskFailed ...
 func (p *BuildTaskPlugin) IsTaskFailed() bool {
 	if p.Task.TaskStatus == config.StatusFailed || p.Task.TaskStatus == config.StatusTimeout || p.Task.TaskStatus == config.StatusCancelled {
 		return true
@@ -363,22 +401,18 @@ func (p *BuildTaskPlugin) IsTaskFailed() bool {
 	return false
 }
 
-// SetStartTime ...
 func (p *BuildTaskPlugin) SetStartTime() {
 	p.Task.StartTime = time.Now().Unix()
 }
 
-// SetEndTime ...
 func (p *BuildTaskPlugin) SetEndTime() {
 	p.Task.EndTime = time.Now().Unix()
 }
 
-// IsTaskEnabled ...
 func (p *BuildTaskPlugin) IsTaskEnabled() bool {
 	return p.Task.Enabled
 }
 
-// ResetError ...
 func (p *BuildTaskPlugin) ResetError() {
 	p.Task.Error = ""
 }

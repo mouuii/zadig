@@ -93,7 +93,7 @@ func ListOpenSourceProduct(log *zap.SugaredLogger) ([]*template.Product, error) 
 // CreateProductTemplate 创建产品模板
 func CreateProductTemplate(args *template.Product, log *zap.SugaredLogger) (err error) {
 	kvs := args.Vars
-	// 不保存vas
+	// do not save vars
 	args.Vars = nil
 
 	err = commonservice.ValidateKVs(kvs, args.AllServiceInfos(), log)
@@ -103,6 +103,21 @@ func CreateProductTemplate(args *template.Product, log *zap.SugaredLogger) (err 
 
 	if err := ensureProductTmpl(args); err != nil {
 		return e.ErrCreateProduct.AddDesc(err.Error())
+	}
+
+	err = commonrepo.NewProjectClusterRelationColl().Delete(&commonrepo.ProjectClusterRelationOption{ProjectName: args.ProductName})
+	if err != nil {
+		log.Errorf("Failed to delete projectClusterRelation, err:%s", err)
+	}
+	for _, clusterID := range args.ClusterIDs {
+		err = commonrepo.NewProjectClusterRelationColl().Create(&commonmodels.ProjectClusterRelation{
+			ProjectName: args.ProductName,
+			ClusterID:   clusterID,
+			CreatedBy:   args.UpdateBy,
+		})
+		if err != nil {
+			log.Errorf("Failed to create projectClusterRelation, err:%s", err)
+		}
 	}
 
 	err = templaterepo.NewProductColl().Create(args)
@@ -130,6 +145,36 @@ func CreateProductTemplate(args *template.Product, log *zap.SugaredLogger) (err 
 }
 
 func UpdateServiceOrchestration(name string, services [][]string, updateBy string, log *zap.SugaredLogger) (err error) {
+	templateProductInfo, err := templaterepo.NewProductColl().Find(name)
+	if err != nil {
+		log.Errorf("failed to query productInfo, projectName: %s, err: %s", name, err)
+		return fmt.Errorf("failed to query productInfo, projectName: %s", name)
+	}
+
+	//validate services
+	validServices := sets.NewString()
+	usedServiceSet := sets.NewString()
+	for _, serviceList := range templateProductInfo.Services {
+		validServices.Insert(serviceList...)
+	}
+
+	for _, serviceSeq := range services {
+		for _, service := range serviceSeq {
+			if usedServiceSet.Has(service) {
+				return fmt.Errorf("duplicated service:%s", service)
+			}
+			if !validServices.Has(service) {
+				return fmt.Errorf("service:%s not in valid service list", service)
+			}
+			usedServiceSet.Insert(service)
+			validServices.Delete(service)
+		}
+	}
+
+	if validServices.Len() > 0 {
+		return fmt.Errorf("service: [%s] not found in params", strings.Join(validServices.List(), ","))
+	}
+
 	if err = templaterepo.NewProductColl().UpdateServiceOrchestration(name, services, updateBy); err != nil {
 		log.Errorf("UpdateChoreographyService error: %v", err)
 		return e.ErrUpdateProduct.AddErr(err)
@@ -316,58 +361,65 @@ func DeleteProductTemplate(userName, productName, requestID string, log *zap.Sug
 	envs, _ := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{Name: productName})
 	for _, env := range envs {
 		if err = commonrepo.NewProductColl().UpdateStatus(env.EnvName, productName, setting.ProductStatusDeleting); err != nil {
-			log.Errorf("DeleteProductTemplate Update product Status error: %v", err)
+			log.Errorf("DeleteProductTemplate Update product Status error: %s", err)
 			return e.ErrDeleteProduct
 		}
 	}
 
 	if err = commonservice.DeleteRenderSet(productName, log); err != nil {
-		log.Errorf("DeleteProductTemplate DeleteRenderSet err: %v", err)
+		log.Errorf("DeleteProductTemplate DeleteRenderSet err: %s", err)
 		return err
 	}
 
 	if err = DeleteTestModules(productName, requestID, log); err != nil {
-		log.Errorf("DeleteProductTemplate Delete productName %s test err: %v", productName, err)
+		log.Errorf("DeleteProductTemplate Delete productName %s test err: %s", productName, err)
 		return err
 	}
 
 	if err = commonservice.DeleteWorkflows(productName, requestID, log); err != nil {
-		log.Errorf("DeleteProductTemplate Delete productName %s workflow err: %v", productName, err)
+		log.Errorf("DeleteProductTemplate Delete productName %s workflow err: %s", productName, err)
+		return err
+	}
+
+	if err = commonservice.DeleteWorkflowV3s(productName, requestID, log); err != nil {
+		log.Errorf("DeleteProductTemplate Delete productName %s workflowV3 err: %s", productName, err)
 		return err
 	}
 
 	if err = commonservice.DeletePipelines(productName, requestID, log); err != nil {
-		log.Errorf("DeleteProductTemplate Delete productName %s pipeline err: %v", productName, err)
+		log.Errorf("DeleteProductTemplate Delete productName %s pipeline err: %s", productName, err)
 		return err
 	}
 
-	//删除自由编排工作流
+	// delete projectClusterRelation
+	if err = commonrepo.NewProjectClusterRelationColl().Delete(&commonrepo.ProjectClusterRelationOption{ProjectName: productName}); err != nil {
+		log.Errorf("DeleteProductTemplate Delete productName %s ProjectClusterRelation err: %s", productName, err)
+	}
+
+	// Delete freestyle workflow
 	cl := configclient.New(configbase.ConfigServiceAddress())
 	if enable, err := cl.CheckFeature(setting.ModernWorkflowType); err == nil && enable {
 		collieClient := collie.New(config.CollieAPIAddress())
 		if err = collieClient.DeleteCIPipelines(productName, log); err != nil {
-			log.Errorf("DeleteProductTemplate Delete productName %s freestyle pipeline err: %v", productName, err)
+			log.Errorf("DeleteProductTemplate Delete productName %s freestyle pipeline err: %s", productName, err)
 		}
 	}
 
 	err = templaterepo.NewProductColl().Delete(productName)
 	if err != nil {
-		log.Errorf("ProductTmpl.Delete error: %v", err)
+		log.Errorf("ProductTmpl.Delete error: %s", err)
 		return e.ErrDeleteProduct
 	}
 
 	err = commonrepo.NewCounterColl().Delete(fmt.Sprintf("product:%s", productName))
 	if err != nil {
-		log.Errorf("Counter.Delete error: %v", err)
+		log.Errorf("Counter.Delete error: %s", err)
 		return err
 	}
 
 	services, _ := commonrepo.NewServiceColl().ListMaxRevisions(
 		&commonrepo.ServiceListOption{ProductName: productName, Type: setting.K8SDeployType},
 	)
-	for _, s := range services {
-		commonservice.ProcessServiceWebhook(nil, s, s.ServiceName, log)
-	}
 
 	//删除交付中心
 	//删除构建/删除测试/删除服务
@@ -377,7 +429,13 @@ func DeleteProductTemplate(userName, productName, requestID string, log *zap.Sug
 		_ = commonrepo.NewServiceColl().Delete("", "", productName, "", 0)
 		_ = commonservice.DeleteDeliveryInfos(productName, log)
 		_ = DeleteProductsAsync(userName, productName, requestID, log)
+
+		// delete service webhooks after services are deleted
+		for _, s := range services {
+			commonservice.ProcessServiceWebhook(nil, s, s.ServiceName, log)
+		}
 	}()
+
 	// 删除workload
 	go func() {
 		workloads, _ := commonrepo.NewWorkLoadsStatColl().FindByProductName(productName)
@@ -516,13 +574,12 @@ func ForkProduct(username, uid, requestID string, args *template.ForkProject, lo
 		UpdateBy:  username,
 	}
 	err = policy.NewDefault().CreateOrUpdateRoleBinding(args.ProductName, &policy.RoleBinding{
-		Name:   fmt.Sprintf(setting.RoleBindingNameFmt, args.ProductName, uid, args.ProductName),
 		UID:    uid,
 		Role:   string(setting.Contributor),
 		Public: true,
 	})
 	if err != nil {
-		log.Error("rolebinding error")
+		log.Errorf("Failed to create or update roleBinding, err: %s", err)
 		return e.ErrForkProduct
 	}
 
@@ -538,10 +595,10 @@ func UnForkProduct(userID string, username, productName, workflowName, envName, 
 		}
 	}
 
-	policyClient := policy.New()
-	err := policyClient.DeleteRoleBinding(fmt.Sprintf(setting.RoleBindingNameFmt, userID, setting.Contributor, productName), productName)
+	policyClient := policy.NewDefault()
+	err := policyClient.DeleteRoleBinding(configbase.RoleBindingNameFromUIDAndRole(userID, setting.Contributor, ""), productName)
 	if err != nil {
-		log.Error("rolebinding delete error")
+		log.Errorf("Failed to delete roleBinding, err: %s", err)
 		return e.ErrForkProduct
 	}
 	if err := commonservice.DeleteProduct(username, envName, productName, requestID, log); err != nil {

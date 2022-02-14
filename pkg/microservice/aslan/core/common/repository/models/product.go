@@ -50,6 +50,9 @@ type Product struct {
 	RecycleDay   int                           `bson:"recycle_day"               json:"recycle_day"`
 	Source       string                        `bson:"source"                    json:"source"`
 	IsOpenSource bool                          `bson:"is_opensource"             json:"is_opensource"`
+	RegistryID   string                        `bson:"registry_id"               json:"registry_id"`
+	// IsExisted is true if this environment is created from an existing one
+	IsExisted bool `bson:"is_existed"                json:"is_existed"`
 	// TODO: temp flag
 	IsForkedProduct bool `bson:"-" json:"-"`
 }

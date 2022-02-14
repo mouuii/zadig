@@ -27,9 +27,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/pm"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
 	"github.com/koderover/zadig/pkg/setting"
 	e "github.com/koderover/zadig/pkg/tool/errors"
@@ -98,10 +100,19 @@ func (p *PMService) listGroupServices(allServices []*commonmodels.ProductService
 				ServiceName: service.ServiceName,
 				Type:        service.Type,
 				EnvName:     envName,
+				Revision:    service.Revision,
 			}
 			serviceTmpl, err := commonservice.GetServiceTemplate(
 				service.ServiceName, setting.PMDeployType, service.ProductName, "", service.Revision, p.log,
 			)
+
+			for _, envconfig := range serviceTmpl.EnvConfigs {
+				if envconfig.EnvName == envName {
+					gp.EnvConfigs = []*models.EnvConfig{envconfig}
+					break
+				}
+			}
+
 			if err != nil {
 				gp.Status = setting.PodFailed
 				mutex.Lock()
@@ -161,14 +172,32 @@ func (p *PMService) createGroup(envName, productName, username string, group []*
 			}
 			if serviceTempl != nil {
 				oldEnvConfigs := serviceTempl.EnvConfigs
+				newEnvConfigs := []*commonmodels.EnvConfig{}
+				// rm not exist env
+				for _, v := range oldEnvConfigs {
+					if _, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
+						Name:    productName,
+						EnvName: v.EnvName,
+					}); err == nil {
+						if envName != v.EnvName {
+							newEnvConfigs = append(newEnvConfigs, v)
+						}
+					}
+				}
 				for _, currentEnvConfig := range productService.EnvConfigs {
 					envConfig := &commonmodels.EnvConfig{
 						EnvName: currentEnvConfig.EnvName,
 						HostIDs: currentEnvConfig.HostIDs,
+						Labels:  currentEnvConfig.Labels,
 					}
-					oldEnvConfigs = append(oldEnvConfigs, envConfig)
+					newEnvConfigs = append(newEnvConfigs, envConfig)
 				}
 
+				changeEnvStatus, err := pm.GenerateEnvStatus(newEnvConfigs, log.NopSugaredLogger())
+				if err != nil {
+					log.Errorf("GenerateEnvStatus err:%s", err)
+					return err
+				}
 				args := &commonservice.ServiceTmplBuildObject{
 					ServiceTmplObject: &commonservice.ServiceTmplObject{
 						ProductName:  serviceTempl.ProductName,
@@ -178,8 +207,8 @@ func (p *PMService) createGroup(envName, productName, username string, group []*
 						Type:         serviceTempl.Type,
 						Username:     username,
 						HealthChecks: serviceTempl.HealthChecks,
-						EnvConfigs:   oldEnvConfigs,
-						EnvStatuses:  []*commonmodels.EnvStatus{},
+						EnvConfigs:   newEnvConfigs,
+						EnvStatuses:  changeEnvStatus,
 						From:         "createEnv",
 					},
 					Build: &commonmodels.Build{Name: serviceTempl.BuildName},

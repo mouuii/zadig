@@ -25,9 +25,7 @@ import (
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/registry"
-	"github.com/koderover/zadig/pkg/setting"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/util"
 )
@@ -54,7 +52,7 @@ const (
 
 // ListRegistries 为了抹掉ak和sk的数据
 func ListRegistries(log *zap.SugaredLogger) ([]*commonmodels.RegistryNamespace, error) {
-	registryNamespaces, err := commonrepo.NewRegistryNamespaceColl().FindAll(&commonrepo.FindRegOps{})
+	registryNamespaces, err := commonservice.ListRegistryNamespaces(false, log)
 	if err != nil {
 		log.Errorf("RegistryNamespace.List error: %v", err)
 		return registryNamespaces, fmt.Errorf("RegistryNamespace.List error: %v", err)
@@ -69,43 +67,21 @@ func ListRegistries(log *zap.SugaredLogger) ([]*commonmodels.RegistryNamespace, 
 func CreateRegistryNamespace(username string, args *commonmodels.RegistryNamespace, log *zap.SugaredLogger) error {
 	regOps := new(commonrepo.FindRegOps)
 	regOps.IsDefault = true
-	registryInfoList, _ := GetRegistryNamespaces(regOps, log)
+	defaultReg, isSystemDefault, err := commonservice.FindDefaultRegistry(false, log)
+	if err != nil {
+		log.Warnf("failed to find the default registry, the error is: %s", err)
+	}
 	if args.IsDefault {
-		for _, registryInfo := range registryInfoList {
-			registryInfo.IsDefault = false
-			err := UpdateRegistryNamespaceDefault(registryInfo, log)
+		if defaultReg != nil && !isSystemDefault {
+			defaultReg.IsDefault = false
+			err := UpdateRegistryNamespaceDefault(defaultReg, log)
 			if err != nil {
 				log.Errorf("updateRegistry error: %v", err)
 				return fmt.Errorf("RegistryNamespace.Create error: %v", err)
 			}
 		}
-
-		envs, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{ExcludeSource: setting.SourceFromExternal})
-		if err != nil {
-			log.Errorf("Failed to list namespaces to update")
-		}
-		for _, env := range envs {
-			go func(prod *commonmodels.Product) {
-				kubeClient, err := kube.GetKubeClient(prod.ClusterID)
-				if err != nil {
-					log.Errorf("[updateRegistry] Failed to get kubecli for namespace: %s", prod.Namespace)
-					return
-				}
-				err = commonservice.EnsureDefaultRegistrySecret(prod.Namespace, kubeClient, log)
-				if err != nil {
-					log.Errorf("[updateRegistry] Failed to update registry secret for namespace: %s, the error is: %+v", prod.Namespace, err)
-				}
-			}(env)
-		}
 	} else {
-		hasDefault := false
-		for _, registryInfo := range registryInfoList {
-			if registryInfo.IsDefault {
-				hasDefault = true
-				break
-			}
-		}
-		if !hasDefault {
+		if isSystemDefault {
 			log.Errorf("create registry error: There must be at least 1 default registry")
 			return fmt.Errorf("RegistryNamespace.Create error: %s", "There must be at least 1 default registry")
 		}
@@ -124,26 +100,22 @@ func CreateRegistryNamespace(username string, args *commonmodels.RegistryNamespa
 func UpdateRegistryNamespace(username, id string, args *commonmodels.RegistryNamespace, log *zap.SugaredLogger) error {
 	regOps := new(commonrepo.FindRegOps)
 	regOps.IsDefault = true
-	registryInfoList, _ := GetRegistryNamespaces(regOps, log)
+	defaultReg, isSystemDefault, err := commonservice.FindDefaultRegistry(false, log)
+	if err != nil {
+		log.Warnf("failed to find the default registry, the error is: %s", err)
+	}
 	if args.IsDefault {
-		for _, registryInfo := range registryInfoList {
-			registryInfo.IsDefault = false
-			err := UpdateRegistryNamespaceDefault(registryInfo, log)
+		if defaultReg != nil && !isSystemDefault {
+			defaultReg.IsDefault = false
+			err := UpdateRegistryNamespaceDefault(defaultReg, log)
 			if err != nil {
 				log.Errorf("updateRegistry error: %v", err)
 				return fmt.Errorf("RegistryNamespace.Update error: %v", err)
 			}
 		}
 	} else {
-		hasDefault := false
-		for _, registryInfo := range registryInfoList {
-			if registryInfo.ID != args.ID {
-				hasDefault = true
-				break
-			}
-		}
-		if !hasDefault {
-			log.Errorf("update registry error: There must be at least 1 default registry")
+		if isSystemDefault || id == defaultReg.ID.Hex() {
+			log.Errorf("create registry error: There must be at least 1 default registry")
 			return fmt.Errorf("RegistryNamespace.Create error: %s", "There must be at least 1 default registry")
 		}
 	}
@@ -154,38 +126,46 @@ func UpdateRegistryNamespace(username, id string, args *commonmodels.RegistryNam
 		log.Errorf("RegistryNamespace.Update error: %v", err)
 		return fmt.Errorf("RegistryNamespace.Update error: %v", err)
 	}
-
-	envs, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{ExcludeSource: setting.SourceFromExternal})
-	if err != nil {
-		log.Errorf("Failed to list namespaces to update")
-	}
-	for _, env := range envs {
-		go func(prod *commonmodels.Product) {
-			kubeClient, err := kube.GetKubeClient(prod.ClusterID)
-			if err != nil {
-				log.Errorf("[updateRegistry] Failed to get kubecli for namespace: %s", prod.Namespace)
-				return
-			}
-			err = commonservice.EnsureDefaultRegistrySecret(prod.Namespace, kubeClient, log)
-			if err != nil {
-				log.Errorf("[updateRegistry] Failed to update registry secret for namespace: %s, the error is: %+v", prod.Namespace, err)
-			}
-		}(env)
-	}
 	return nil
 }
 
 func DeleteRegistryNamespace(id string, log *zap.SugaredLogger) error {
-	if err := commonrepo.NewRegistryNamespaceColl().Delete(id); err != nil {
-		log.Errorf("RegistryNamespace.Delete error: %v", err)
+	registries, err := commonrepo.NewRegistryNamespaceColl().FindAll(&commonrepo.FindRegOps{})
+	if err != nil {
+		log.Errorf("RegistryNamespace.FindAll error: %s", err)
 		return err
+	}
+	var (
+		isDefault          = false
+		registryNamespaces []*commonmodels.RegistryNamespace
+	)
+	// whether it is the default registry
+	for _, registry := range registries {
+		if registry.ID.Hex() == id && registry.IsDefault {
+			isDefault = true
+			continue
+		}
+		registryNamespaces = append(registryNamespaces, registry)
+	}
+
+	if err := commonrepo.NewRegistryNamespaceColl().Delete(id); err != nil {
+		log.Errorf("RegistryNamespace.Delete error: %s", err)
+		return err
+	}
+
+	if isDefault && len(registryNamespaces) > 0 {
+		registryNamespaces[0].IsDefault = true
+		if err := commonrepo.NewRegistryNamespaceColl().Update(registryNamespaces[0].ID.Hex(), registryNamespaces[0]); err != nil {
+			log.Errorf("RegistryNamespace.Update error: %s", err)
+			return err
+		}
 	}
 	return nil
 }
 
 func ListAllRepos(log *zap.SugaredLogger) ([]*RepoInfo, error) {
 	repoInfos := make([]*RepoInfo, 0)
-	resp, err := commonrepo.NewRegistryNamespaceColl().FindAll(&commonrepo.FindRegOps{})
+	resp, err := commonservice.ListRegistryNamespaces(false, log)
 	if err != nil {
 		log.Errorf("RegistryNamespace.List error: %v", err)
 		return nil, fmt.Errorf("RegistryNamespace.List error: %v", err)
@@ -201,15 +181,6 @@ func ListAllRepos(log *zap.SugaredLogger) ([]*RepoInfo, error) {
 		repoInfos = append(repoInfos, repoInfo)
 	}
 	return repoInfos, nil
-}
-
-func GetRegistryNamespace(regOps *commonrepo.FindRegOps, log *zap.SugaredLogger) (*commonmodels.RegistryNamespace, error) {
-	resp, err := commonrepo.NewRegistryNamespaceColl().Find(regOps)
-	if err != nil {
-		log.Errorf("RegistryNamespace.get error: %v", err)
-		return nil, fmt.Errorf("RegistryNamespace.get error: %v", err)
-	}
-	return resp, nil
 }
 
 func ListReposTags(registryInfo *commonmodels.RegistryNamespace, names []string, logger *zap.SugaredLogger) ([]*RepoImgResp, error) {
@@ -229,7 +200,7 @@ func ListReposTags(registryInfo *commonmodels.RegistryNamespace, names []string,
 		for _, repo := range repos.Repos {
 			for _, tag := range repo.Tags {
 				img := &RepoImgResp{
-					Host:  util.GetURLHostName(registryInfo.RegAddr),
+					Host:  util.TrimURLScheme(registryInfo.RegAddr),
 					Owner: repo.Namespace,
 					Name:  repo.Name,
 					Tag:   tag,
@@ -279,15 +250,6 @@ func GetRepoTags(registryInfo *commonmodels.RegistryNamespace, name string, log 
 	}
 
 	return resp, err
-}
-
-func GetRegistryNamespaces(regOps *commonrepo.FindRegOps, log *zap.SugaredLogger) ([]*commonmodels.RegistryNamespace, error) {
-	resp, err := commonrepo.NewRegistryNamespaceColl().FindAll(regOps)
-	if err != nil {
-		log.Errorf("RegistryNamespace.findAll error: %+v", err)
-		return nil, fmt.Errorf("RegistryNamespace.findAll error: %v", err)
-	}
-	return resp, nil
 }
 
 func UpdateRegistryNamespaceDefault(args *commonmodels.RegistryNamespace, log *zap.SugaredLogger) error {

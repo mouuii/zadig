@@ -25,15 +25,16 @@ import (
 
 	"github.com/koderover/zadig/pkg/microservice/reaper/config"
 	"github.com/koderover/zadig/pkg/setting"
+	"github.com/koderover/zadig/pkg/types"
 )
 
-// Context ...
 type Context struct {
 	// API token 服务访问使用的api token
 	APIToken string `yaml:"api_token"`
 	// Workspace 容器工作目录 [必填]
 	Workspace string `yaml:"workspace"`
 
+	// TODO: Deprecated.
 	// CleanWorkspace 是否清理工作目录 [选填, 默认为 false]
 	CleanWorkspace bool `yaml:"clean_workspace"`
 
@@ -85,6 +86,7 @@ type Context struct {
 	// Git Github/Gitlab 配置
 	Git *Git `yaml:"git"`
 
+	// TODO: Deprecated.
 	// Caches Caches配置
 	Caches []string `yaml:"caches"`
 
@@ -115,6 +117,14 @@ type Context struct {
 	StorageBucket   string        `yaml:"storage_bucket"`
 	StorageProvider int           `yaml:"storage_provider"`
 	ArtifactInfo    *ArtifactInfo `yaml:"artifact_info"`
+	ArtifactPath    string        `yaml:"artifact_path"`
+	AesKey          string        `yaml:"aes_key"`
+
+	// New since V1.10.0.
+	CacheEnable  bool               `yaml:"cache_enable"`
+	Cache        types.Cache        `yaml:"cache"`
+	CacheDirType types.CacheDirType `yaml:"cache_dir_type"`
+	CacheUserDir string             `yaml:"cache_user_dir"`
 }
 
 type ArtifactInfo struct {
@@ -130,13 +140,13 @@ type ArtifactInfo struct {
 // DockerFile: dockerfile名称, 默认为Dockerfile
 // ImageBuild: build image镜像全称, e.g. xxx.com/spock-release-candidates/image:tag
 type DockerBuildCtx struct {
-	Source          string `yaml:"source"      bson:"source"      json:"source"`
-	TemplateID      string `yaml:"template_id" bson:"template_id" json:"template_id"`
-	WorkDir         string `yaml:"work_dir"    bson:"work_dir"    json:"work_dir"`
-	DockerFile      string `yaml:"docker_file" bson:"docker_file" json:"docker_file"`
-	ImageName       string `yaml:"image_name"  bson:"image_name"  json:"image_name"`
-	BuildArgs       string `yaml:"build_args"  bson:"build_args"  json:"build_args"`
-	ImageReleaseTag string `yaml:"image_release_tag,omitempty" bson:"image_release_tag,omitempty" json:"image_release_tag"`
+	Source                string `yaml:"source"      bson:"source"      json:"source"`
+	WorkDir               string `yaml:"work_dir"    bson:"work_dir"    json:"work_dir"`
+	DockerFile            string `yaml:"docker_file" bson:"docker_file" json:"docker_file"`
+	ImageName             string `yaml:"image_name"  bson:"image_name"  json:"image_name"`
+	BuildArgs             string `yaml:"build_args"  bson:"build_args"  json:"build_args"`
+	ImageReleaseTag       string `yaml:"image_release_tag,omitempty" bson:"image_release_tag,omitempty" json:"image_release_tag"`
+	DockerTemplateContent string `yaml:"docker_template_content" bson:"docker_template_content" json:"docker_template_content"`
 }
 
 func (c *DockerBuildCtx) GetDockerFile() string {

@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The KodeRover Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package bundle
 
 // TODO: Policy Service should not care about the policy details of a certain service, instead, a service which wants
@@ -58,16 +74,32 @@ var publicURLs = []*policyRule{
 	},
 	{
 		Methods:   []string{"GET"},
-		Endpoints: []string{"", "signin", "setup", "static/**", "v1/**", "mobile/**", "productpipelines/**", "favicon.ico"},
+		Endpoints: []string{"", "signin", "setup", "static/**", "v1/**", "mobile/**", "workflows/**", "favicon.ico"},
 	},
 	{
 		Methods:   []string{"GET"},
-		Endpoints: []string{"api/directory/codehostss/?*/auth", "api/directory/codehosts/callback"},
+		Endpoints: []string{"api/directory/codehosts/callback"},
+	},
+	{
+		Methods:   []string{"GET"},
+		Endpoints: []string{"api/v1/features/?*"},
+	},
+	{
+		Methods:   []string{"GET"},
+		Endpoints: []string{"api/aslan/system/jenkins/exist"},
+	},
+	{
+		Methods:   []string{"POST"},
+		Endpoints: []string{"api/callback"},
 	},
 }
 
 // actions which are allowed for system admins only.
 var systemAdminURLs = []*policyRule{
+	{
+		Methods:   []string{"PUT"},
+		Endpoints: []string{"api/v1/features/?*"},
+	},
 	{
 		Methods:   []string{"POST"},
 		Endpoints: []string{"api/aslan/project/products"},
@@ -109,7 +141,7 @@ var systemAdminURLs = []*policyRule{
 		Endpoints: []string{"api/aslan/system/proxyManage/?*"},
 	},
 	{
-		Methods:   []string{"GET", "POST"},
+		Methods:   []string{"POST"},
 		Endpoints: []string{"api/aslan/system/registry/namespaces"},
 	},
 	{
@@ -197,8 +229,12 @@ var systemAdminURLs = []*policyRule{
 		Endpoints: []string{"api/aslan/system/proxy/config"},
 	},
 	{
-		Methods:   []string{"*"},
+		Methods:   []string{"GET", "PUT", "PATCH"},
 		Endpoints: []string{"api/v1/users/?*"},
+	},
+	{
+		Methods:   []string{"DELETE"},
+		Endpoints: []string{"api/v1/picket/users/?*"},
 	},
 	{
 		Methods:   []string{"POST"},
@@ -227,6 +263,30 @@ var systemAdminURLs = []*policyRule{
 	{
 		Methods:   []string{"DELETE"},
 		Endpoints: []string{"api/v1/system-rolebindings/?*"},
+	},
+	{
+		Methods:   []string{"POST"},
+		Endpoints: []string{"api/aslan/template/yaml"},
+	},
+	{
+		Methods:   []string{"PUT", "DELETE"},
+		Endpoints: []string{"api/aslan/template/yaml/?*"},
+	},
+	{
+		Methods:   []string{"POST"},
+		Endpoints: []string{"api/aslan/template/dockerfile"},
+	},
+	{
+		Methods:   []string{"PUT", "DELETE"},
+		Endpoints: []string{"api/aslan/template/dockerfile/?*"},
+	},
+	{
+		Methods:   []string{"POST"},
+		Endpoints: []string{"api/aslan/template/charts"},
+	},
+	{
+		Methods:   []string{"PUT", "DELETE"},
+		Endpoints: []string{"api/aslan/template/charts/?*"},
 	},
 }
 

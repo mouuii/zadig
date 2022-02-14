@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KodeRover Authors.
+Copyright 2022 The KodeRover Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -34,39 +35,6 @@ import (
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/log"
 )
-
-func GetWorkflowTaskProductName(c *gin.Context) {
-	args := new(commonmodels.WorkflowTaskArgs)
-	data, err := c.GetRawData()
-	if err != nil {
-		log.Errorf("c.GetRawData() err : %v", err)
-		return
-	}
-	if err = json.Unmarshal(data, args); err != nil {
-		log.Errorf("json.Unmarshal err : %v", err)
-		return
-	}
-	c.Set("productName", args.ProductTmplName)
-	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
-	c.Next()
-}
-
-func GetWorkflowTaskProductNameByTask(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
-	taskID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		ctx.Err = e.ErrInvalidParam.AddDesc("invalid task id")
-		return
-	}
-
-	pipelineTask, err := workflow.GetPipelineTaskV2(taskID, c.Param("name"), config.WorkflowType, ctx.Logger)
-	if err != nil {
-		log.Errorf("GetPipelineTaskV2 err : %v", err)
-		return
-	}
-	c.Set("productName", pipelineTask.WorkflowArgs.ProductTmplName)
-	c.Next()
-}
 
 // GetWorkflowArgs find workflow args
 func GetWorkflowArgs(c *gin.Context) {
@@ -165,7 +133,19 @@ func ListWorkflowTasksResult(c *gin.Context) {
 	if workflowType == string(config.TestType) {
 		workflowTypeString = config.TestType
 	}
-	ctx.Resp, ctx.Err = workflow.ListPipelineTasksV2Result(c.Param("name"), workflowTypeString, maxResult, startAt, ctx.Logger)
+	filters := c.Query("filters")
+	filtersList := strings.Split(filters, ",")
+	ctx.Resp, ctx.Err = workflow.ListPipelineTasksV2Result(c.Param("name"), workflowTypeString, c.Query("queryType"), filtersList, maxResult, startAt, ctx.Logger)
+}
+
+func GetFiltersPipeline(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+	if c.Query("workflowType") != string(config.WorkflowType) {
+		ctx.Err = e.ErrInvalidParam.AddDesc("invalid workflowType")
+		return
+	}
+	ctx.Resp, ctx.Err = workflow.GetFiltersPipelineTaskV2(c.Query("projectName"), c.Param("name"), c.Query("queryType"), config.WorkflowType, ctx.Logger)
 }
 
 func GetWorkflowTask(c *gin.Context) {

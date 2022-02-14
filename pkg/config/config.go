@@ -210,12 +210,20 @@ func ObjectStorageTemplatePath(name, kind string) string {
 	return filepath.Join("templates", kind, name)
 }
 
+func ObjectStorageDeliveryVersionPath(project string) string {
+	return filepath.Join("delivery-distributes", "files", project)
+}
+
 func ObjectStorageChartTemplatePath(name string) string {
 	return ObjectStorageTemplatePath(name, setting.ChartTemplatesPath)
 }
 
 func LocalServicePath(project, service string) string {
 	return filepath.Join(DataPath(), project, service)
+}
+
+func LocalServicePathWithRevision(project, service, revision string) string {
+	return filepath.Join(DataPath(), project, service, revision)
 }
 
 func LocalTemplatePath(name, kind string) string {
@@ -252,4 +260,12 @@ func AdminEmail() string {
 
 func AdminPassword() string {
 	return viper.GetString(setting.ENVAdminPassword)
+}
+
+func Namespace() string {
+	return viper.GetString(setting.ENVNamespace)
+}
+
+func RoleBindingNameFromUIDAndRole(uid string, role setting.RoleType, roleNamespace string) string {
+	return fmt.Sprintf("%s-%s-%s", uid, role, roleNamespace)
 }

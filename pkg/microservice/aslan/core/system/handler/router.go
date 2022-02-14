@@ -61,6 +61,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		registry.GET("", ListRegistries)
 		// 获取默认的镜像仓库配置，用于kodespace CLI调用
 		registry.GET("/namespaces/default", GetDefaultRegistryNamespace)
+		registry.GET("/namespaces/specific/:id", GetRegistryNamespace)
 		registry.GET("/namespaces", ListRegistryNamespaces)
 		registry.POST("/namespaces", gin2.UpdateOperationLogStatus, CreateRegistryNamespace)
 		registry.PUT("/namespaces/:id", gin2.UpdateOperationLogStatus, UpdateRegistryNamespace)
@@ -103,6 +104,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	// ---------------------------------------------------------------------------------------
 	jenkins := router.Group("jenkins")
 	{
+		jenkins.GET("/exist", CheckJenkinsIntegration)
 		jenkins.POST("/integration", CreateJenkinsIntegration)
 		jenkins.GET("/integration", ListJenkinsIntegration)
 		jenkins.PUT("/integration/:id", UpdateJenkinsIntegration)
@@ -195,5 +197,17 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		externalLink.POST("", gin2.UpdateOperationLogStatus, CreateExternalLink)
 		externalLink.PUT("/:id", gin2.UpdateOperationLogStatus, UpdateExternalLink)
 		externalLink.DELETE("/:id", gin2.UpdateOperationLogStatus, DeleteExternalLink)
+	}
+
+	// ---------------------------------------------------------------------------------------
+	// external system API
+	// ---------------------------------------------------------------------------------------
+	externalSystem := router.Group("external")
+	{
+		externalSystem.POST("", gin2.UpdateOperationLogStatus, CreateExternalSystem)
+		externalSystem.GET("", ListExternalSystem)
+		externalSystem.GET("/:id", GetExternalSystemDetail)
+		externalSystem.PUT("/:id", gin2.UpdateOperationLogStatus, UpdateExternalSystem)
+		externalSystem.DELETE("/:id", gin2.UpdateOperationLogStatus, DeleteExternalSystem)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	templ "text/template"
@@ -29,9 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
 
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
 	templatemodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
@@ -69,6 +68,7 @@ type ServiceTmplObject struct {
 	EnvStatuses  []*commonmodels.EnvStatus     `json:"env_statuses,omitempty"`
 	From         string                        `json:"from,omitempty"`
 	HealthChecks []*commonmodels.PmHealthCheck `json:"health_checks"`
+	EnvName      string                        `json:"env_name"`
 }
 
 type ServiceProductMap struct {
@@ -432,10 +432,11 @@ func UpdatePmServiceTemplate(username string, args *ServiceTmplBuildObject, log 
 		return err
 	}
 	preService.HealthChecks = args.ServiceTmplObject.HealthChecks
-	preService.EnvConfigs = args.ServiceTmplObject.EnvConfigs
 	preService.Revision = rev
 	preService.CreateBy = username
 	preService.BuildName = args.Build.Name
+	preService.EnvConfigs = args.ServiceTmplObject.EnvConfigs
+	preService.EnvStatuses = args.ServiceTmplObject.EnvStatuses
 
 	if err := commonrepo.NewServiceColl().Delete(preService.ServiceName, setting.PMDeployType, args.ServiceTmplObject.ProductName, setting.ProductStatusDeleting, preService.Revision); err != nil {
 		return err
@@ -614,7 +615,56 @@ func ExtractImageName(imageURI string) string {
 	return ""
 }
 
-func parseImagesByPattern(nested map[string]interface{}, patterns []map[string]string) ([]*models.Container, error) {
+// ExtractImageRegistry extract registry url from total image uri
+func ExtractImageRegistry(imageURI string) (string, error) {
+	subMatchAll := imageParseRegex.FindStringSubmatch(imageURI)
+	exNames := imageParseRegex.SubexpNames()
+	for i, matchedStr := range subMatchAll {
+		if i != 0 && matchedStr != "" && matchedStr != ":" {
+			if exNames[i] == "repo" {
+				u, err := url.Parse(matchedStr)
+				if err != nil {
+					return "", err
+				}
+				if len(u.Scheme) > 0 {
+					matchedStr = strings.TrimPrefix(matchedStr, fmt.Sprintf("%s://", u.Scheme))
+				}
+				return matchedStr, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("failed to extract registry url")
+}
+
+// ExtractImageTag extract image tag from total image uri
+func ExtractImageTag(imageURI string) string {
+	subMatchAll := imageParseRegex.FindStringSubmatch(imageURI)
+	exNames := imageParseRegex.SubexpNames()
+	for i, matchedStr := range subMatchAll {
+		if i != 0 && matchedStr != "" && matchedStr != ":" {
+			if exNames[i] == "tag" {
+				return matchedStr
+			}
+		}
+	}
+	return ""
+}
+
+// ExtractRegistryNamespace extract registry namespace from image uri
+func ExtractRegistryNamespace(imageURI string) string {
+	imageURI = strings.TrimPrefix(imageURI, "http://")
+	imageURI = strings.TrimPrefix(imageURI, "https://")
+
+	imageComponent := strings.Split(imageURI, "/")
+	if len(imageComponent) <= 2 {
+		return ""
+	}
+
+	nsComponent := imageComponent[1 : len(imageComponent)-1]
+	return strings.Join(nsComponent, "/")
+}
+
+func parseImagesByPattern(nested map[string]interface{}, patterns []map[string]string) ([]*commonmodels.Container, error) {
 	flatMap, err := converter.Flatten(nested)
 	if err != nil {
 		return nil, err
@@ -623,16 +673,16 @@ func parseImagesByPattern(nested map[string]interface{}, patterns []map[string]s
 	if err != nil {
 		return nil, err
 	}
-	ret := make([]*models.Container, 0)
+	ret := make([]*commonmodels.Container, 0)
 	for _, searchResult := range matchedPath {
 		imageUrl, err := GeneImageURI(searchResult, flatMap)
 		if err != nil {
 			return nil, err
 		}
-		ret = append(ret, &models.Container{
+		ret = append(ret, &commonmodels.Container{
 			Name:  ExtractImageName(imageUrl),
 			Image: imageUrl,
-			ImagePath: &models.ImagePathSpec{
+			ImagePath: &commonmodels.ImagePathSpec{
 				Repo:  searchResult[setting.PathSearchComponentRepo],
 				Image: searchResult[setting.PathSearchComponentImage],
 				Tag:   searchResult[setting.PathSearchComponentTag],
@@ -642,7 +692,7 @@ func parseImagesByPattern(nested map[string]interface{}, patterns []map[string]s
 	return ret, nil
 }
 
-func ParseImagesByRules(nested map[string]interface{}, matchRules []*template.ImageSearchingRule) ([]*models.Container, error) {
+func ParseImagesByRules(nested map[string]interface{}, matchRules []*templatemodels.ImageSearchingRule) ([]*commonmodels.Container, error) {
 	patterns := make([]map[string]string, 0)
 	for _, rule := range matchRules {
 		if !rule.InUse {
@@ -675,7 +725,7 @@ func getServiceParsePatterns(productName string) ([]map[string]string, error) {
 }
 
 // ParseImagesForProductService for product service
-func ParseImagesForProductService(nested map[string]interface{}, serviceName, productName string) ([]*models.Container, error) {
+func ParseImagesForProductService(nested map[string]interface{}, serviceName, productName string) ([]*commonmodels.Container, error) {
 	patterns, err := getServiceParsePatterns(productName)
 	if err != nil {
 		log.Errorf("failed to get image parse patterns for service %s in project %s, err: %s", serviceName, productName, err)
@@ -689,10 +739,10 @@ func ParseImagesByPresetRules(flatMap map[string]interface{}) ([]map[string]stri
 	return yamlutil.SearchByPattern(flatMap, presetPatterns)
 }
 
-func GetPresetRules() []*template.ImageSearchingRule {
-	ret := make([]*template.ImageSearchingRule, 0, len(presetPatterns))
+func GetPresetRules() []*templatemodels.ImageSearchingRule {
+	ret := make([]*templatemodels.ImageSearchingRule, 0, len(presetPatterns))
 	for id, pattern := range presetPatterns {
-		ret = append(ret, &template.ImageSearchingRule{
+		ret = append(ret, &templatemodels.ImageSearchingRule{
 			Repo:     pattern[setting.PathSearchComponentRepo],
 			Image:    pattern[setting.PathSearchComponentImage],
 			Tag:      pattern[setting.PathSearchComponentTag],

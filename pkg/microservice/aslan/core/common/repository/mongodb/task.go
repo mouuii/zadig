@@ -34,7 +34,9 @@ import (
 
 type ListTaskOption struct {
 	PipelineName   string
+	PipelineNames  []string
 	Status         config.Status
+	Statuses       []string
 	Team           string
 	TeamID         int
 	Limit          int
@@ -43,7 +45,9 @@ type ListTaskOption struct {
 	Type           config.PipelineType
 	CreateTime     int64
 	TaskCreator    string
+	TaskCreators   []string
 	Source         string
+	Committers     []string
 	MergeRequestID string
 	NeedTriggerBy  bool
 	NeedAllData    bool
@@ -191,6 +195,63 @@ func (c *TaskColl) FindLatestTask(args *FindTaskOption) (*task.Task, error) {
 	return res, err
 }
 
+type TaskInfo struct {
+	ID           taskGrouped `bson:"_id"`
+	TaskID       int64       `bson:"task_id"`
+	PipelineName string      `bson:"pipeline_name"`
+	Status       string      `bson:"status"`
+}
+
+type taskGrouped struct {
+	PipelineName string              `bson:"pipeline_name"`
+	Type         config.PipelineType `bson:"type"`
+}
+
+func (c *TaskColl) ListRecentTasks(args *ListTaskOption) ([]*TaskInfo, error) {
+	query := bson.M{"is_deleted": false}
+	if args.Type != "" {
+		query["type"] = args.Type
+	}
+	if args.Status != "" {
+		query["status"] = args.Status
+	}
+	if len(args.PipelineNames) > 0 {
+		query["pipeline_name"] = bson.M{"$in": args.PipelineNames}
+	}
+
+	pipeline := []bson.M{
+		{
+			"$match": query,
+		},
+		{
+			"$sort": bson.M{"task_id": -1},
+		},
+		{
+			"$group": bson.M{
+				"_id": bson.D{
+					{"pipeline_name", "$pipeline_name"},
+					{"type", "$type"},
+				},
+				"pipeline_name": bson.M{"$first": "$pipeline_name"},
+				"task_id":       bson.M{"$first": "$task_id"},
+				"status":        bson.M{"$first": "$status"},
+			},
+		},
+	}
+
+	cursor, err := c.Aggregate(context.TODO(), pipeline)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]*TaskInfo, 0)
+	if err := cursor.All(context.TODO(), &res); err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
 func (c *TaskColl) List(option *ListTaskOption) (ret []*TaskPreview, err error) {
 	ret = make([]*TaskPreview, 0)
 	if option == nil {
@@ -207,14 +268,21 @@ func (c *TaskColl) List(option *ListTaskOption) (ret []*TaskPreview, err error) 
 	if option.PipelineName != "" {
 		query["pipeline_name"] = option.PipelineName
 	}
-	if option.Status != "" {
+	if len(option.Statuses) > 0 {
+		query["status"] = bson.M{"$in": option.Statuses}
+	} else if option.Status != "" {
 		query["status"] = option.Status
 	}
 	if option.Team != "" {
 		query["team"] = option.Team
 	}
-	if option.TaskCreator != "" {
+	if len(option.TaskCreators) > 0 {
+		query["task_creator"] = bson.M{"$in": option.TaskCreators}
+	} else if option.TaskCreator != "" {
 		query["task_creator"] = option.TaskCreator
+	}
+	if len(option.Committers) > 0 {
+		query["workflow_args.committer"] = bson.M{"$in": option.Committers}
 	}
 	if option.Source != "" {
 		query["trigger_by.source"] = option.Source
@@ -332,7 +400,10 @@ func (c *TaskColl) Create(args *task.Task) error {
 
 type CountTaskOption struct {
 	PipelineNames []string
+	Statuses      []string
 	Status        config.TaskStatus
+	TaskCreators  []string
+	Committers    []string
 	Type          config.PipelineType
 }
 
@@ -342,10 +413,18 @@ func (c *TaskColl) Count(option *CountTaskOption) (ret int, err error) {
 	}
 
 	query := bson.M{}
+	if len(option.TaskCreators) > 0 {
+		query["task_creator"] = bson.M{"$in": option.TaskCreators}
+	}
+	if len(option.Committers) > 0 {
+		query["workflow_args.committer"] = bson.M{"$in": option.Committers}
+	}
 	if option.PipelineNames != nil {
 		query["pipeline_name"] = bson.M{"$in": option.PipelineNames}
 	}
-	if option.Status != "" {
+	if len(option.Statuses) > 0 {
+		query["status"] = bson.M{"$in": option.Statuses}
+	} else if option.Status != "" {
 		query["status"] = option.Status
 	}
 	if option.Type != "" {
@@ -532,4 +611,14 @@ func (c *TaskColl) ArchiveHistoryPipelineTask(pipelineName string, taskType conf
 	_, err = c.UpdateMany(context.TODO(), query, change)
 
 	return err
+}
+
+func (c *TaskColl) DistinctFieldsPipelineTask(fieldName, projectName, pipelineName string, typeString config.PipelineType, isNeedAllData bool) ([]interface{}, error) {
+	query := bson.M{"product_name": projectName, "pipeline_name": pipelineName, "type": typeString, "is_deleted": false}
+	if isNeedAllData {
+		createTime := timeutil.BeginningOfDay().AddDate(0, -3, 0).Unix()
+		query["create_time"] = bson.M{"$gt": createTime}
+	}
+	res, err := c.Distinct(context.TODO(), fieldName, query)
+	return res, err
 }

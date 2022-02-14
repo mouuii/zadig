@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The KodeRover Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package login
 
 import (
@@ -7,12 +23,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/oauth2"
 
+	configbase "github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/user/config"
 	"github.com/koderover/zadig/pkg/microservice/user/core/service/login"
 	"github.com/koderover/zadig/pkg/microservice/user/core/service/user"
@@ -39,6 +57,7 @@ func Login(c *gin.Context) {
 		RedirectURL:  config.RedirectURI(),
 	}
 	authCodeURL := oauth2Config.AuthCodeURL(config.AppState, oauth2.AccessTypeOffline)
+	authCodeURL = strings.Replace(authCodeURL, config.IssuerURL(), configbase.SystemAddress()+"/dex", -1)
 	c.Redirect(http.StatusSeeOther, authCodeURL)
 }
 
@@ -84,6 +103,9 @@ func verifyAndDecode(ctx context.Context, code string) (*login.Claims, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(claims.Name) == 0 {
+		claims.Name = claims.PreferredUsername
+	}
 	return &claims, nil
 }
 
@@ -112,7 +134,7 @@ func Callback(c *gin.Context) {
 	}
 
 	user, err := user.SyncUser(&user.SyncUserInfo{
-		Account:      claims.FederatedClaims.UserId,
+		Account:      claims.PreferredUsername,
 		Name:         claims.Name,
 		Email:        claims.Email,
 		IdentityType: claims.FederatedClaims.ConnectorId,

@@ -42,6 +42,8 @@ Zadig 是一款面向开发者设计的云原生持续交付(Continuous Delivery
 
 ![业务架构图](./Zadig-Business-Architecture-zh.jpg)
 
+想了解更多系统架构信息，参考 [系统架构简介](System-Architecture-Overview-zh-CN.md).
+
 产品特性介绍：
 
 <details>
@@ -73,7 +75,7 @@ Zadig 是一款面向开发者设计的云原生持续交付(Continuous Delivery
 
 ### 快速使用
 
-请参阅 [快速入门](https://docs.koderover.com/zadig/quick-start/try-out-install)
+请参阅 [快速入门](https://docs.koderover.com/zadig/quick-start/try-out-install/)
 
 ### 训练营
 

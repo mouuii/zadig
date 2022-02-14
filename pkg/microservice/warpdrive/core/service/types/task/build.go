@@ -21,6 +21,7 @@ import (
 
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/config"
 	"github.com/koderover/zadig/pkg/setting"
+	"github.com/koderover/zadig/pkg/types"
 )
 
 type Build struct {
@@ -46,9 +47,10 @@ type Build struct {
 	ImageFrom         string               `bson:"image_from"                 json:"image_from,omitempty"`
 	ImageID           string               `bson:"image_id"                   json:"image_id"`
 	ResReq            setting.Request      `bson:"res_req"                    json:"res_req"`
+	ResReqSpec        setting.RequestSpec  `bson:"res_req_spec"               json:"res_req_spec"`
 	LogFile           string               `bson:"log_file"                   json:"log_file"`
 	InstallCtx        []*Install           `bson:"-"                          json:"install_ctx,omitempty"`
-	Registries        []*RegistryNamespace `bson:"-"                   json:"registries"`
+	Registries        []*RegistryNamespace `bson:"-"                          json:"registries"`
 	StaticCheckStatus *StaticCheckStatus   `bson:"static_check_status,omitempty" json:"static_check_status,omitempty"`
 	UTStatus          *UTStatus            `bson:"ut_status,omitempty" json:"ut_status,omitempty"`
 	DockerBuildStatus *DockerBuildStatus   `bson:"docker_build_status,omitempty" json:"docker_build_status,omitempty"`
@@ -57,6 +59,13 @@ type Build struct {
 	// Get the host bound to the environment of the cloud host service configuration
 	EnvHostInfo  map[string][]string `bson:"env_host_info,omitempty"         json:"env_host_info,omitempty"`
 	ArtifactInfo *ArtifactInfo       `bson:"artifact_info,omitempty"         json:"artifact_info,omitempty"`
+	ClusterID    string              `bson:"cluster_id,omitempty"            json:"cluster_id,omitempty"`
+
+	// New since V1.10.0.
+	Cache        types.Cache        `bson:"cache"               json:"cache"`
+	CacheEnable  bool               `bson:"cache_enable"        json:"cache_enable"`
+	CacheDirType types.CacheDirType `bson:"cache_dir_type"      json:"cache_dir_type"`
+	CacheUserDir string             `bson:"cache_user_dir"      json:"cache_user_dir"`
 }
 
 type ArtifactInfo struct {
@@ -85,6 +94,7 @@ type Install struct {
 }
 
 type RegistryNamespace struct {
+	ID          string `bson:"_id,omitempty"               json:"id,omitempty"`
 	RegAddr     string `bson:"reg_addr"                    json:"reg_addr"`
 	RegType     string `bson:"reg_type"                    json:"reg_type"`
 	RegProvider string `bson:"reg_provider"                json:"reg_provider"`
@@ -145,9 +155,11 @@ type DockerBuildStatus struct {
 }
 
 type JobCtx struct {
-	EnableProxy    bool   `bson:"enable_proxy"                   json:"enable_proxy"`
-	Proxy          *Proxy `bson:"proxy"                          json:"proxy"`
-	CleanWorkspace bool   `bson:"clean_workspace"                json:"clean_workspace"`
+	EnableProxy bool   `bson:"enable_proxy"                   json:"enable_proxy"`
+	Proxy       *Proxy `bson:"proxy"                          json:"proxy"`
+
+	// TODO: Deprecated.
+	CleanWorkspace bool `bson:"clean_workspace"                json:"clean_workspace"`
 
 	// BuildJobCtx
 	Builds     []*Repository `bson:"builds"                         json:"builds"`
@@ -170,8 +182,12 @@ type JobCtx struct {
 	FileArchiveCtx *FileArchiveCtx `bson:"file_archive_ctx,omitempty" json:"file_archive_ctx,omitempty"`
 	// TestType
 	TestType string `bson:"test_type"                       json:"test_type"`
-	// Caches
-	Caches        []string `bson:"caches" json:"caches"`
+
+	// TODO: Deprecated.
+	Caches []string `bson:"caches" json:"caches"`
+
+	// buildV3
+	ArtifactPath  string   `bson:"artifact_path,omitempty"  json:"artifact_path,omitempty"`
 	ArtifactPaths []string `bson:"artifact_paths,omitempty" json:"artifact_paths,omitempty"`
 	IsHasArtifact bool     `bson:"is_has_artifact" json:"is_has_artifact"`
 	// StorageUri is used for qbox release-candidates
@@ -199,13 +215,13 @@ type SSH struct {
 // DockerFile: dockerfile名称, 默认为Dockerfile
 // ImageBuild: build image镜像全称, e.g. xxx.com/release-candidates/image:tag
 type DockerBuildCtx struct {
-	WorkDir         string `yaml:"work_dir" bson:"work_dir" json:"work_dir"`
-	DockerFile      string `yaml:"docker_file" bson:"docker_file" json:"docker_file"`
-	ImageName       string `yaml:"image_name" bson:"image_name" json:"image_name"`
-	BuildArgs       string `yaml:"build_args" bson:"build_args" json:"build_args"`
-	ImageReleaseTag string `yaml:"image_release_tag,omitempty" bson:"image_release_tag,omitempty" json:"image_release_tag"`
-	Source          string `yaml:"source" bson:"source" json:"source"`
-	TemplateID      string `yaml:"template_id" bson:"template_id" json:"template_id"`
+	WorkDir               string `yaml:"work_dir" bson:"work_dir" json:"work_dir"`
+	DockerFile            string `yaml:"docker_file" bson:"docker_file" json:"docker_file"`
+	ImageName             string `yaml:"image_name" bson:"image_name" json:"image_name"`
+	BuildArgs             string `yaml:"build_args" bson:"build_args" json:"build_args"`
+	ImageReleaseTag       string `yaml:"image_release_tag,omitempty" bson:"image_release_tag,omitempty" json:"image_release_tag"`
+	Source                string `yaml:"source" bson:"source" json:"source"`
+	DockerTemplateContent string `yaml:"docker_template_content" bson:"docker_template_content" json:"docker_template_content"`
 }
 
 type FileArchiveCtx struct {
@@ -222,10 +238,19 @@ func (buildCtx *DockerBuildCtx) GetDockerFile() string {
 	return buildCtx.DockerFile
 }
 
+type ParameterSettingType string
+
+const (
+	StringType ParameterSettingType = "string"
+	ChoiceType ParameterSettingType = "choice"
+)
+
 type KeyVal struct {
-	Key          string `bson:"key"                 json:"key"`
-	Value        string `bson:"value"               json:"value"`
-	IsCredential bool   `bson:"is_credential"       json:"is_credential"`
+	Key          string               `bson:"key"                 json:"key"`
+	Value        string               `bson:"value"               json:"value"`
+	Type         ParameterSettingType `bson:"type,omitempty"                json:"type,omitempty"`
+	ChoiceOption []string             `bson:"choice_option,omitempty"       json:"choice_option,omitempty"`
+	IsCredential bool                 `bson:"is_credential"       json:"is_credential"`
 }
 
 type Repository struct {

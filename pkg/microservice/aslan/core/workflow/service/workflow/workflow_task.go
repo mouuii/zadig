@@ -19,6 +19,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"reflect"
 	"regexp"
 	"sort"
@@ -40,6 +41,7 @@ import (
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/base"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/s3"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/scmnotify"
+	templ "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/template"
 	"github.com/koderover/zadig/pkg/setting"
 	"github.com/koderover/zadig/pkg/shared/client/systemconfig"
 	e "github.com/koderover/zadig/pkg/tool/errors"
@@ -188,6 +190,27 @@ func getProductTargetMap(prod *commonmodels.Product) map[string][]commonmodels.D
 	return resp
 }
 
+func getHideServiceModules(workflow *commonmodels.Workflow) sets.String {
+	hideServiceModules := sets.NewString()
+	if workflow.BuildStage != nil && workflow.BuildStage.Enabled {
+		for _, buildModule := range workflow.BuildStage.Modules {
+			if buildModule.HideServiceModule {
+				hideServiceModules.Insert(strings.Join([]string{buildModule.Target.ProductName, buildModule.Target.ServiceName, buildModule.Target.ServiceModule}, SplitSymbol))
+			}
+		}
+	}
+
+	if workflow.ArtifactStage != nil && workflow.ArtifactStage.Enabled {
+		for _, artifactModule := range workflow.ArtifactStage.Modules {
+			if artifactModule.HideServiceModule {
+				hideServiceModules.Insert(strings.Join([]string{artifactModule.Target.ProductName, artifactModule.Target.ServiceName, artifactModule.Target.ServiceModule}, SplitSymbol))
+			}
+		}
+	}
+
+	return hideServiceModules
+}
+
 func getProjectTargets(productName string) []string {
 	var targets []string
 	productTmpl, err := template.NewProductColl().Find(productName)
@@ -323,9 +346,13 @@ func PresetWorkflowArgs(namespace, workflowName string, log *zap.SugaredLogger) 
 
 	targetMap := getProductTargetMap(product)
 	projectTargets := getProjectTargets(product.ProductName)
+	hideServiceModules := getHideServiceModules(workflow)
 	targets := make([]*commonmodels.TargetArgs, 0)
 	if (workflow.BuildStage != nil && workflow.BuildStage.Enabled) || (workflow.ArtifactStage != nil && workflow.ArtifactStage.Enabled) {
 		for _, container := range projectTargets {
+			if hideServiceModules.Has(container) {
+				continue
+			}
 			if _, ok := targetMap[container]; !ok {
 				continue
 			}
@@ -405,6 +432,8 @@ func PresetWorkflowArgs(namespace, workflowName string, log *zap.SugaredLogger) 
 							Key:          moduleEnv.Key,
 							Value:        moduleEnv.Value,
 							IsCredential: moduleEnv.IsCredential,
+							ChoiceOption: moduleEnv.ChoiceOption,
+							Type:         moduleEnv.Type,
 						})
 					}
 				}
@@ -441,26 +470,35 @@ func CreateWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator string,
 		return nil, fmt.Errorf("args should not be nil")
 	}
 
-	// RequestMode=openAPI表示外部客户调用API，部分数据需要获取并补充到args中
-	if args.RequestMode == "openAPI" {
+	// RequestMode=openAPI means that external clients call the API, and some data needs to be obtained and added to args
+	if args.RequestMode == setting.RequestModeOpenAPI {
 		log.Info("CreateWorkflowTask from openAPI")
-		err := AddDataToArgs(args, log)
+		resp, err := AddDataToArgsOrCreateReleaseImageTask(args, log)
 		if err != nil {
 			log.Errorf("AddDataToArgs error: %v", err)
 			return nil, err
 		}
-	}
-
-	productTempl, err := template.NewProductColl().Find(args.ProductTmplName)
-	if err != nil {
-		log.Errorf("productTempl.Find error: %v", err)
-		return nil, e.ErrFindWorkflow.AddDesc(err.Error())
+		// create release image task
+		if resp != nil {
+			return resp, nil
+		}
+		taskCreator = setting.RequestModeOpenAPI
 	}
 
 	workflow, err := commonrepo.NewWorkflowColl().Find(args.WorkflowName)
 	if err != nil {
 		log.Errorf("Workflow.Find error: %v", err)
 		return nil, e.ErrFindWorkflow.AddDesc(err.Error())
+	}
+
+	project, err := template.NewProductColl().Find(workflow.ProductTmplName)
+	if err != nil {
+		log.Errorf("project.Find error: %v", err)
+		return nil, e.ErrFindWorkflow.AddDesc(err.Error())
+	}
+	// developer don't pass args.ProductTmplName
+	if args.ProductTmplName == "" {
+		args.ProductTmplName = workflow.ProductTmplName
 	}
 	args.IsParallel = workflow.IsParallel
 
@@ -486,31 +524,24 @@ func CreateWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator string,
 		}
 	}
 
-	nextTaskID, err := commonrepo.NewCounterColl().GetNextSeq(fmt.Sprintf(setting.WorkflowTaskFmt, args.WorkflowName))
-	if err != nil {
-		log.Errorf("Counter.GetNextSeq error: %v", err)
-		return nil, e.ErrGetCounter.AddDesc(err.Error())
-	}
-
 	// 获取全局configpayload
 	configPayload := commonservice.GetConfigPayload(args.CodehostID)
-	repos, err := commonrepo.NewRegistryNamespaceColl().FindAll(&commonrepo.FindRegOps{})
-	if err == nil {
-		configPayload.RepoConfigs = make(map[string]*commonmodels.RegistryNamespace)
-		for _, repo := range repos {
-			// if the registry is SWR, we need to modify ak/sk according to the rule
-			if repo.RegProvider == config.SWRProvider {
-				ak := fmt.Sprintf("%s@%s", repo.Region, repo.AccessKey)
-				sk := util.ComputeHmacSha256(repo.AccessKey, repo.SecretKey)
-				repo.AccessKey = ak
-				repo.SecretKey = sk
-			}
-			configPayload.RepoConfigs[repo.ID.Hex()] = repo
+	if len(env.RegistryID) == 0 {
+		reg, _, err := commonservice.FindDefaultRegistry(false, log)
+		if err != nil {
+			log.Errorf("get default registry error: %v", err)
+			return nil, e.ErrGetCounter.AddDesc(err.Error())
 		}
+		env.RegistryID = reg.ID.Hex()
 	}
+	configPayload.RegistryID = env.RegistryID
 
-	configPayload.IgnoreCache = args.IgnoreCache
-	configPayload.ResetCache = args.ResetCache
+	nextTaskID, err := generateNextTaskID(args.WorkflowName)
+	if err != nil {
+		return nil, err
+	}
+	// modify configPayload
+	modifyConfigPayload(configPayload, args.IgnoreCache, args.ResetCache)
 
 	distributeS3StoreURL, defaultS3StoreURL, err := getDefaultAndDestS3StoreURL(workflow, log)
 	if err != nil {
@@ -526,7 +557,8 @@ func CreateWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator string,
 			buildModuleArgs := &commonmodels.BuildModuleArgs{
 				Target:      target.Name,
 				ServiceName: target.ServiceName,
-				ProductName: target.ProductName,
+				//ProductName: target.ProductName,				// TODO productName may be nil in some situation, need to figure out reason
+				ProductName: args.ProductTmplName,
 				Variables:   target.Envs,
 				Env:         env,
 			}
@@ -550,7 +582,7 @@ func CreateWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator string,
 				if deployEnv.Type == setting.PMDeployType {
 					continue
 				}
-				deployTask, err := deployEnvToSubTasks(deployEnv, env, productTempl.Timeout)
+				deployTask, err := deployEnvToSubTasks(deployEnv, env, project.Timeout)
 				if err != nil {
 					log.Errorf("deploy env to subtask error: %v", err)
 					return nil, e.ErrCreateTask.AddErr(err)
@@ -701,20 +733,21 @@ func CreateWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator string,
 		CommitID:       args.CommitID,
 	}
 	task := &task.Task{
-		TaskID:        nextTaskID,
-		Type:          config.WorkflowType,
-		ProductName:   workflow.ProductTmplName,
-		PipelineName:  args.WorkflowName,
-		Description:   args.Description,
-		TaskCreator:   taskCreator,
-		ReqID:         args.ReqID,
-		Status:        config.StatusCreated,
-		Stages:        stages,
-		WorkflowArgs:  args,
-		ConfigPayload: configPayload,
-		StorageURI:    defaultS3StoreURL,
-		ResetImage:    workflow.ResetImage,
-		TriggerBy:     triggerBy,
+		TaskID:           nextTaskID,
+		Type:             config.WorkflowType,
+		ProductName:      workflow.ProductTmplName,
+		PipelineName:     args.WorkflowName,
+		Description:      args.Description,
+		TaskCreator:      taskCreator,
+		ReqID:            args.ReqID,
+		Status:           config.StatusCreated,
+		Stages:           stages,
+		WorkflowArgs:     args,
+		ConfigPayload:    configPayload,
+		StorageURI:       defaultS3StoreURL,
+		ResetImage:       workflow.ResetImage,
+		ResetImagePolicy: workflow.ResetImagePolicy,
+		TriggerBy:        triggerBy,
 	}
 
 	if len(task.Stages) <= 0 {
@@ -743,141 +776,361 @@ func CreateWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator string,
 	}
 
 	_ = scmnotify.NewService().UpdateWebhookComment(task, log)
-	resp := &CreateTaskResp{PipelineName: args.WorkflowName, TaskID: nextTaskID}
+	resp := &CreateTaskResp{
+		ProjectName:  args.ProductTmplName,
+		PipelineName: args.WorkflowName,
+		TaskID:       nextTaskID,
+	}
 	return resp, nil
 }
 
-func AddDataToArgs(args *commonmodels.WorkflowTaskArgs, log *zap.SugaredLogger) error {
-	if args.Target == nil || len(args.Target) == 0 {
-		return errors.New("target cannot be empty")
+func generateNextTaskID(workflowName string) (int64, error) {
+	nextTaskID, err := commonrepo.NewCounterColl().GetNextSeq(fmt.Sprintf(setting.WorkflowTaskFmt, workflowName))
+	if err != nil {
+		log.Errorf("Counter.GetNextSeq error: %s", err)
+		return 0, e.ErrGetCounter.AddDesc(err.Error())
+	}
+	return nextTaskID, nil
+}
+
+func modifyConfigPayload(configPayload *commonmodels.ConfigPayload, ignoreCache, resetCache bool) {
+	repos, err := commonservice.ListRegistryNamespaces(true, log.SugaredLogger())
+	if err == nil {
+		configPayload.RepoConfigs = make(map[string]*commonmodels.RegistryNamespace)
+		for _, repo := range repos {
+			configPayload.RepoConfigs[repo.ID.Hex()] = repo
+		}
 	}
 
-	builds, err := commonrepo.NewBuildColl().List(&commonrepo.BuildListOption{})
-	if err != nil {
-		log.Errorf("[Build.List] error: %v", err)
-		return e.ErrListBuildModule.AddErr(err)
+	configPayload.IgnoreCache = ignoreCache
+	configPayload.ResetCache = resetCache
+
+}
+
+// add data to workflow args or create release image task
+func AddDataToArgsOrCreateReleaseImageTask(args *commonmodels.WorkflowTaskArgs, log *zap.SugaredLogger) (*CreateTaskResp, error) {
+	if len(args.Target) == 0 && len(args.ReleaseImages) == 0 {
+		return nil, errors.New("target and release_images cannot be empty at the same time")
 	}
 
 	workflow, err := commonrepo.NewWorkflowColl().Find(args.WorkflowName)
 	if err != nil {
-		log.Errorf("[Workflow.Find] error: %v", err)
-		return e.ErrFindWorkflow.AddErr(err)
+		log.Errorf("[Workflow.Find] error: %s", err)
+		return nil, e.ErrFindWorkflow.AddErr(err)
 	}
-
-	args.ProductTmplName = workflow.ProductTmplName
-
-	// 补全target信息
-	for _, target := range args.Target {
-		target.HasBuild = true
-		// openAPI模式，传入的name是服务名称
-		// 只支持k8s服务
-		opt := &commonrepo.ServiceFindOption{
-			ServiceName:   target.Name,
-			ProductName:   workflow.ProductTmplName,
-			Type:          setting.K8SDeployType,
-			ExcludeStatus: setting.ProductStatusDeleting}
-		serviceTmpl, err := commonrepo.NewServiceColl().Find(opt)
+	if len(args.Target) > 0 {
+		builds, err := commonrepo.NewBuildColl().List(&commonrepo.BuildListOption{})
 		if err != nil {
-			log.Errorf("[ServiceTmpl.Find] error: %v", err)
-			return e.ErrGetService.AddErr(err)
+			log.Errorf("[Build.List] error: %s", err)
+			return nil, e.ErrListBuildModule.AddErr(err)
 		}
+		args.ProductTmplName = workflow.ProductTmplName
 
-		// 补全target中的deploy信息
-		deploys := make([]commonmodels.DeployEnv, 0)
-		for _, container := range serviceTmpl.Containers {
-			// 如果服务中的服务组件存在构建，将该服务组件放进deploy
+		// Complete target information
+		for _, target := range args.Target {
+			target.HasBuild = true
+			// OpenAPI mode, the name passed in is the service name
+			serviceType, err := getValidServiceType(target.ServiceType)
+			if err != nil {
+				return nil, err
+			}
+			opt := &commonrepo.ServiceFindOption{
+				ServiceName:   target.Name,
+				ProductName:   workflow.ProductTmplName,
+				Type:          serviceType,
+				ExcludeStatus: setting.ProductStatusDeleting}
+			serviceTmpl, err := commonrepo.NewServiceColl().Find(opt)
+			if err != nil {
+				log.Errorf("[ServiceTmpl.Find] error: %s", err)
+				return nil, e.ErrGetService.AddErr(err)
+			}
+
+			// Complete the deploy information in the target
+			deploys := make([]commonmodels.DeployEnv, 0)
+			for _, container := range serviceTmpl.Containers {
+				// If the service component in the service is built, put the service component into deploy
+				for _, build := range builds {
+					for _, moduleTarget := range build.Targets {
+						serviceModuleTarget := &commonmodels.ServiceModuleTarget{
+							ProductName:   serviceTmpl.ProductName,
+							ServiceName:   serviceTmpl.ServiceName,
+							ServiceModule: container.Name,
+						}
+						if reflect.DeepEqual(moduleTarget, serviceModuleTarget) {
+							deployEnv := commonmodels.DeployEnv{Env: serviceTmpl.ServiceName + "/" + container.Name, Type: serviceTmpl.Type, ProductName: serviceTmpl.ProductName}
+							deploys = append(deploys, deployEnv)
+						}
+					}
+				}
+			}
+			target.Deploy = deploys
+
+			// Complete the build information in the target
 			for _, build := range builds {
-				for _, moduleTarget := range build.Targets {
+				if len(build.Targets) == 0 {
+					continue
+				}
+				// If the service component owned by the build contains any service component of the service, the match is considered successful
+				match := false
+				for _, container := range serviceTmpl.Containers {
 					serviceModuleTarget := &commonmodels.ServiceModuleTarget{
 						ProductName:   serviceTmpl.ProductName,
 						ServiceName:   serviceTmpl.ServiceName,
 						ServiceModule: container.Name,
 					}
-					if reflect.DeepEqual(moduleTarget, serviceModuleTarget) {
-						deployEnv := commonmodels.DeployEnv{Env: serviceTmpl.ServiceName + "/" + container.Name, Type: serviceTmpl.Type, ProductName: serviceTmpl.ProductName}
-						deploys = append(deploys, deployEnv)
+					for _, buildTarget := range build.Targets {
+						if reflect.DeepEqual(buildTarget, serviceModuleTarget) {
+							target.Name = container.Name
+							target.ServiceName = serviceTmpl.ServiceName
+							match = true
+							break
+						}
+					}
+				}
+				if !match {
+					continue
+				}
+				// If the service component is successfully matched, match the warehouse name from the built warehouse list and add the repo information
+				if target.Build == nil {
+					continue
+				}
+				for _, buildRepo := range build.Repos {
+					for _, targetRepo := range target.Build.Repos {
+						if targetRepo.RepoName == buildRepo.RepoName {
+							// openAPI only pass repoName, branch, pr
+							targetRepo.Source = buildRepo.Source
+							targetRepo.RepoOwner = buildRepo.RepoOwner
+							targetRepo.RemoteName = buildRepo.RemoteName
+							targetRepo.CodehostID = buildRepo.CodehostID
+							targetRepo.CheckoutPath = buildRepo.CheckoutPath
+						}
 					}
 				}
 			}
 		}
-		target.Deploy = deploys
+		// Complete test information
+		if workflow.TestStage != nil && workflow.TestStage.Enabled {
+			tests := make([]*commonmodels.TestArgs, 0)
+			for _, testName := range workflow.TestStage.TestNames {
+				moduleTest, err := commonrepo.NewTestingColl().Find(testName, "")
+				if err != nil {
+					log.Errorf("[Testing.Find] TestModuleName:%s, error:%s", testName, err)
+					continue
+				}
+				test := &commonmodels.TestArgs{
+					TestModuleName: testName,
+					Namespace:      args.Namespace,
+					Builds:         moduleTest.Repos,
+				}
+				tests = append(tests, test)
+			}
 
-		// 补全target中的build信息
-		for _, build := range builds {
-			if len(build.Targets) == 0 {
+			for _, testEntity := range workflow.TestStage.Tests {
+				moduleTest, err := commonrepo.NewTestingColl().Find(testEntity.Name, "")
+				if err != nil {
+					log.Errorf("[Testing.Find] TestModuleName:%s, error:%s", testEntity.Name, err)
+					continue
+				}
+				test := &commonmodels.TestArgs{
+					TestModuleName: testEntity.Name,
+					Namespace:      args.Namespace,
+					Builds:         moduleTest.Repos,
+				}
+				tests = append(tests, test)
+			}
+			args.Tests = tests
+		}
+
+		return nil, nil
+	}
+
+	return createReleaseImageTask(workflow, args, log)
+}
+
+func buildRegistryMap() (map[string]*commonmodels.RegistryNamespace, error) {
+	registries, err := commonservice.ListRegistryNamespaces(true, log.SugaredLogger())
+	if err != nil {
+		return nil, fmt.Errorf("failed to query registries")
+	}
+	ret := make(map[string]*commonmodels.RegistryNamespace)
+	for _, singleRegistry := range registries {
+		fullUrl := fmt.Sprintf("%s/%s", singleRegistry.RegAddr, singleRegistry.Namespace)
+		fullUrl = strings.TrimSuffix(fullUrl, "/")
+		u, _ := url.Parse(fullUrl)
+		if len(u.Scheme) > 0 {
+			fullUrl = strings.TrimPrefix(fullUrl, fmt.Sprintf("%s://", u.Scheme))
+		}
+		ret[fullUrl] = singleRegistry
+	}
+	return ret, nil
+}
+
+func createReleaseImageTask(workflow *commonmodels.Workflow, args *commonmodels.WorkflowTaskArgs, log *zap.SugaredLogger) (*CreateTaskResp, error) {
+	// Get global configPayload
+	configPayload := commonservice.GetConfigPayload(0)
+	args.ProductTmplName = workflow.ProductTmplName
+	nextTaskID, err := generateNextTaskID(workflow.Name)
+	if err != nil {
+		return nil, err
+	}
+	// modify configPayload
+	modifyConfigPayload(configPayload, false, false)
+
+	registryMap, err := buildRegistryMap()
+	if err != nil {
+		log.Errorf("failed to build registry map, err: %s", err)
+		// use default registry
+		reg, _, err := commonservice.FindDefaultRegistry(true, log)
+		if err != nil {
+			log.Errorf("can't find default candidate registry, err: %s", err)
+			return nil, e.ErrFindRegistry.AddDesc(err.Error())
+		}
+		configPayload.Registry.Addr = reg.RegAddr
+		configPayload.Registry.AccessKey = reg.AccessKey
+		configPayload.Registry.SecretKey = reg.SecretKey
+		configPayload.Registry.Namespace = reg.Namespace
+	} else {
+		// extract registry from image
+		for _, releaseImage := range args.ReleaseImages {
+			registryUrl, err := commonservice.ExtractImageRegistry(releaseImage.Image)
+			if err != nil {
+				log.Errorf("failed to extract image registry, image:%s  err: %s", releaseImage.Image, err)
 				continue
 			}
-			// 如果该构建拥有的服务组件 包含 该服务的任一服务组件，则认为匹配成功
-			match := false
-			for _, container := range serviceTmpl.Containers {
-				serviceModuleTarget := &commonmodels.ServiceModuleTarget{
-					ProductName:   serviceTmpl.ProductName,
-					ServiceName:   serviceTmpl.ServiceName,
-					ServiceModule: container.Name,
-				}
-				for _, buildTarget := range build.Targets {
-					if reflect.DeepEqual(buildTarget, serviceModuleTarget) {
-						target.Name = container.Name
-						match = true
-						break
-					}
-				}
-			}
-			if !match {
-				continue
-			}
-			// 服务组件匹配成功，则从该构建的仓库列表 匹配仓库名称，并添加repo信息
-			if target.Build == nil {
-				continue
-			}
-			for _, buildRepo := range build.Repos {
-				for _, targetRepo := range target.Build.Repos {
-					if targetRepo.RepoName == buildRepo.RepoName {
-						// openAPI仅上传了repoName、branch、pr
-						targetRepo.Source = buildRepo.Source
-						targetRepo.RepoOwner = buildRepo.RepoOwner
-						targetRepo.RemoteName = buildRepo.RemoteName
-						targetRepo.CodehostID = buildRepo.CodehostID
-						targetRepo.CheckoutPath = buildRepo.CheckoutPath
-					}
-				}
+			registryUrl = strings.TrimSuffix(registryUrl, "/")
+			if reg, ok := registryMap[registryUrl]; ok {
+				configPayload.Registry.Addr = reg.RegAddr
+				configPayload.Registry.AccessKey = reg.AccessKey
+				configPayload.Registry.SecretKey = reg.SecretKey
+				configPayload.Registry.Namespace = reg.Namespace
+				break
 			}
 		}
 	}
-	// 补全test信息
-	if workflow.TestStage != nil && workflow.TestStage.Enabled {
-		tests := make([]*commonmodels.TestArgs, 0)
-		for _, testName := range workflow.TestStage.TestNames {
-			moduleTest, err := commonrepo.NewTestingColl().Find(testName, "")
-			if err != nil {
-				log.Errorf("[Testing.Find] TestModuleName:%s, error:%v", testName, err)
-				continue
-			}
-			test := &commonmodels.TestArgs{
-				TestModuleName: testName,
-				Namespace:      args.Namespace,
-				Builds:         moduleTest.Repos,
-			}
-			tests = append(tests, test)
-		}
 
-		for _, testEntity := range workflow.TestStage.Tests {
-			moduleTest, err := commonrepo.NewTestingColl().Find(testEntity.Name, "")
-			if err != nil {
-				log.Errorf("[Testing.Find] TestModuleName:%s, error:%v", testEntity.Name, err)
-				continue
-			}
-			test := &commonmodels.TestArgs{
-				TestModuleName: testEntity.Name,
-				Namespace:      args.Namespace,
-				Builds:         moduleTest.Repos,
-			}
-			tests = append(tests, test)
-		}
-		args.Tests = tests
+	distributeS3StoreURL, defaultS3StoreURL, err := getDefaultAndDestS3StoreURL(workflow, log)
+	if err != nil {
+		log.Errorf("getDefaultAndDestS3StoreUrl workflow name:[%s] err:%s", workflow.Name, err)
+		return nil, e.ErrCreateTask.AddErr(err)
 	}
 
-	return nil
+	stages := make([]*commonmodels.Stage, 0)
+	// Generate distributed subtask
+	if workflow.DistributeStage != nil && workflow.DistributeStage.Enabled {
+		var (
+			distributeTasks []map[string]interface{}
+			err             error
+			subTasks        = make([]map[string]interface{}, 0)
+		)
+
+		for _, imageInfo := range args.ReleaseImages {
+			for _, distribute := range workflow.DistributeStage.Distributes {
+				if distribute.Target == nil {
+					continue
+				}
+				if distribute.Target.ServiceModule == imageInfo.ServiceModule && distribute.Target.ServiceName == imageInfo.ServiceName {
+					distributeTasks, err = formatDistributeSubtasks(
+						workflow.DistributeStage.Releases,
+						workflow.DistributeStage.ImageRepo,
+						workflow.DistributeStage.JumpBoxHost,
+						distributeS3StoreURL,
+						distribute,
+					)
+					if err != nil {
+						log.Errorf("distrbiute stages to subtasks error: %s", err)
+						return nil, e.ErrCreateTask.AddErr(err)
+					}
+				}
+			}
+			subTasks = append(subTasks, distributeTasks...)
+
+			// Fill in the associated content between subtasks
+			task := &task.Task{
+				TaskID:        nextTaskID,
+				PipelineName:  workflow.Name,
+				TaskCreator:   setting.RequestModeOpenAPI,
+				ReqID:         args.ReqID,
+				SubTasks:      subTasks,
+				ServiceName:   imageInfo.ServiceModule,
+				ConfigPayload: configPayload,
+				TaskArgs:      &commonmodels.TaskArgs{PipelineName: workflow.Name, TaskCreator: setting.RequestModeOpenAPI, Deploy: commonmodels.DeployArgs{Image: imageInfo.Image}},
+				ProductName:   workflow.ProductTmplName,
+			}
+			sort.Sort(ByTaskKind(task.SubTasks))
+
+			if err := ensurePipelineTask(task, "", log); err != nil {
+				log.Errorf("workflow_task ensurePipelineTask taskID:[%d] pipelineName:[%s] err:%s", task.ID, task.PipelineName, err)
+				if err, ok := err.(*ContainerNotFound); ok {
+					err := e.NewWithExtras(
+						e.ErrCreateTaskFailed.AddErr(err),
+						"container doesn't exists", map[string]interface{}{
+							"productName":   err.ProductName,
+							"envName":       err.EnvName,
+							"serviceName":   err.ServiceName,
+							"containerName": err.Container,
+						})
+					return nil, err
+				}
+				if _, ok := err.(*ImageIllegal); ok {
+					return nil, e.ErrCreateTask.AddDesc("IMAGE is illegal")
+				}
+				return nil, e.ErrCreateTask.AddDesc(err.Error())
+			}
+
+			for _, stask := range task.SubTasks {
+				AddSubtaskToStage(&stages, stask, imageInfo.ServiceModule)
+			}
+		}
+	}
+
+	sort.Sort(ByStageKind(stages))
+	task := &task.Task{
+		WorkflowArgs:  args,
+		TaskID:        nextTaskID,
+		Type:          config.WorkflowType,
+		ProductName:   workflow.ProductTmplName,
+		PipelineName:  workflow.Name,
+		TaskCreator:   setting.RequestModeOpenAPI,
+		ReqID:         args.ReqID,
+		Status:        config.StatusCreated,
+		Stages:        stages,
+		ConfigPayload: configPayload,
+		StorageURI:    defaultS3StoreURL,
+	}
+
+	if len(task.Stages) <= 0 {
+		errMessage := fmt.Sprintf("%s or %s", e.PipelineSubTaskNotFoundErrMsg, "Invalid service module")
+		return nil, e.ErrCreateTask.AddDesc(errMessage)
+	}
+
+	endpoint := fmt.Sprintf("%s-%s:9000", config.Namespace(), ClusterStorageEP)
+	task.StorageEndpoint = endpoint
+
+	if err := CreateTask(task); err != nil {
+		log.Errorf("workflow Create task:[%v] err:%s", task, err)
+		return nil, e.ErrCreateTask
+	}
+
+	resp := &CreateTaskResp{
+		ProjectName:  workflow.ProductTmplName,
+		PipelineName: workflow.Name,
+		TaskID:       nextTaskID,
+	}
+
+	return resp, nil
+}
+
+// Only supports k8s and helm two service types currently
+func getValidServiceType(serviceType string) (string, error) {
+	switch serviceType {
+	// Compatible when the service_type is equal to empty
+	case setting.K8SDeployType, "":
+		return setting.K8SDeployType, nil
+	case setting.HelmDeployType:
+		return setting.HelmDeployType, nil
+	default:
+		return "", fmt.Errorf("Unsupported service type")
+	}
 }
 
 func dealWithNamespace(args *commonmodels.WorkflowTaskArgs) {
@@ -1049,6 +1302,22 @@ func resetImageTaskToSubTask(env commonmodels.DeployEnv, prodEnv *commonmodels.P
 		deployTask.ServiceName = envList[0]
 		deployTask.ContainerName = envList[1]
 		return deployTask.ToSubTask()
+	case setting.HelmDeployType:
+		deployTask := task.Deploy{TaskType: config.TaskResetImage, Enabled: true}
+		deployTask.Namespace = prodEnv.Namespace
+		deployTask.ProductName = prodEnv.ProductName
+		deployTask.SkipWaiting = true
+		deployTask.EnvName = prodEnv.EnvName
+		envList := strings.Split(env.Env, "/")
+		if len(envList) != 2 {
+			err := fmt.Errorf("[%s]split target env error", env.Env)
+			log.Error(err)
+			return nil, err
+		}
+		deployTask.ServiceName = envList[0]
+		deployTask.ContainerName = envList[1]
+		deployTask.ServiceType = setting.HelmDeployType
+		return deployTask.ToSubTask()
 	default:
 		return nil, nil
 	}
@@ -1142,6 +1411,8 @@ func workFlowArgsToTaskArgs(target string, workflowArgs *commonmodels.WorkflowTa
 // TODO 和validation中转化testsubtask合并为一个方法
 func testArgsToSubtask(args *commonmodels.WorkflowTaskArgs, pt *task.Task, log *zap.SugaredLogger) ([]*task.Testing, error) {
 	var resp []*task.Testing
+	var servicesArray []string
+	var services string
 
 	// 创建任务的测试参数为脱敏数据，需要转换为实际数据
 	for _, test := range args.Tests {
@@ -1151,10 +1422,15 @@ func testArgsToSubtask(args *commonmodels.WorkflowTaskArgs, pt *task.Task, log *
 		}
 	}
 
+	for _, service := range args.Target {
+		servicesArray = append(servicesArray, service.ServiceName)
+	}
+	services = strings.Join(servicesArray, ",")
+
 	testArgs := args.Tests
 	testCreator := args.WorkflowTaskCreator
 
-	registries, err := commonservice.ListRegistryNamespaces(log)
+	registries, err := commonservice.ListRegistryNamespaces(true, log)
 	if err != nil {
 		log.Errorf("ListRegistryNamespaces err:%v", err)
 	}
@@ -1195,6 +1471,8 @@ func testArgsToSubtask(args *commonmodels.WorkflowTaskArgs, pt *task.Task, log *
 			testTask.InstallItems = testModule.PreTest.Installs
 			testTask.JobCtx.CleanWorkspace = testModule.PreTest.CleanWorkspace
 			testTask.JobCtx.EnableProxy = testModule.PreTest.EnableProxy
+			testTask.Namespace = testModule.PreTest.Namespace
+			testTask.ClusterID = testModule.PreTest.ClusterID
 
 			envs := testModule.PreTest.Envs[:]
 
@@ -1208,10 +1486,14 @@ func testArgsToSubtask(args *commonmodels.WorkflowTaskArgs, pt *task.Task, log *
 				}
 			}
 			envs = append(envs, &commonmodels.KeyVal{Key: "TEST_URL", Value: GetLink(pt, configbase.SystemAddress(), config.WorkflowType)})
+			envs = append(envs, &commonmodels.KeyVal{Key: "SERVICES", Value: services})
+
 			testTask.JobCtx.EnvVars = envs
 			testTask.ImageID = testModule.PreTest.ImageID
 			testTask.BuildOS = testModule.PreTest.BuildOS
 			testTask.ImageFrom = testModule.PreTest.ImageFrom
+			testTask.ClusterID = testModule.PreTest.ClusterID
+			testTask.Namespace = testModule.PreTest.Namespace
 			// 自定义基础镜像的镜像名称可能会被更新，需要使用ID获取最新的镜像名称
 			if testModule.PreTest.ImageID != "" {
 				basicImage, err := commonrepo.NewBasicImageColl().Find(testModule.PreTest.ImageID)
@@ -1222,6 +1504,7 @@ func testArgsToSubtask(args *commonmodels.WorkflowTaskArgs, pt *task.Task, log *
 				}
 			}
 			testTask.ResReq = testModule.PreTest.ResReq
+			testTask.ResReqSpec = testModule.PreTest.ResReqSpec
 		}
 		// 设置 build 安装脚本
 		testTask.InstallCtx, err = buildInstallCtx(testTask.InstallItems)
@@ -1284,7 +1567,7 @@ func CreateArtifactWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator
 
 	// 获取全局configpayload
 	configPayload := commonservice.GetConfigPayload(args.CodehostID)
-	repos, err := commonrepo.NewRegistryNamespaceColl().FindAll(&commonrepo.FindRegOps{})
+	repos, err := commonservice.ListRegistryNamespaces(true, log)
 	if err == nil {
 		configPayload.RepoConfigs = make(map[string]*commonmodels.RegistryNamespace)
 		for _, repo := range repos {
@@ -1470,20 +1753,21 @@ func CreateArtifactWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator
 		CommitID:       args.CommitID,
 	}
 	task := &task.Task{
-		TaskID:        nextTaskID,
-		Type:          config.WorkflowType,
-		ProductName:   workflow.ProductTmplName,
-		PipelineName:  args.WorkflowName,
-		Description:   args.Description,
-		TaskCreator:   taskCreator,
-		ReqID:         args.ReqID,
-		Status:        config.StatusCreated,
-		Stages:        stages,
-		WorkflowArgs:  args,
-		ConfigPayload: configPayload,
-		StorageURI:    defaultS3StoreURL,
-		ResetImage:    workflow.ResetImage,
-		TriggerBy:     triggerBy,
+		TaskID:           nextTaskID,
+		Type:             config.WorkflowType,
+		ProductName:      workflow.ProductTmplName,
+		PipelineName:     args.WorkflowName,
+		Description:      args.Description,
+		TaskCreator:      taskCreator,
+		ReqID:            args.ReqID,
+		Status:           config.StatusCreated,
+		Stages:           stages,
+		WorkflowArgs:     args,
+		ConfigPayload:    configPayload,
+		StorageURI:       defaultS3StoreURL,
+		ResetImage:       workflow.ResetImage,
+		ResetImagePolicy: workflow.ResetImagePolicy,
+		TriggerBy:        triggerBy,
 	}
 
 	if len(task.Stages) <= 0 {
@@ -1508,7 +1792,11 @@ func CreateArtifactWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator
 	}
 
 	_ = scmnotify.NewService().UpdateWebhookComment(task, log)
-	resp := &CreateTaskResp{PipelineName: args.WorkflowName, TaskID: nextTaskID}
+	resp := &CreateTaskResp{
+		ProjectName:  workflow.ProductTmplName,
+		PipelineName: args.WorkflowName,
+		TaskID:       nextTaskID,
+	}
 	return resp, nil
 }
 
@@ -1539,7 +1827,7 @@ func BuildModuleToSubTasks(args *commonmodels.BuildModuleArgs, log *zap.SugaredL
 		return nil, e.ErrConvertSubTasks.AddErr(err)
 	}
 
-	registries, err := commonservice.ListRegistryNamespaces(log)
+	registries, err := commonservice.ListRegistryNamespaces(true, log)
 	if err != nil {
 		return nil, e.ErrConvertSubTasks.AddErr(err)
 	}
@@ -1556,9 +1844,27 @@ func BuildModuleToSubTasks(args *commonmodels.BuildModuleArgs, log *zap.SugaredL
 			BuildOS:      module.PreBuild.BuildOS,
 			ImageFrom:    module.PreBuild.ImageFrom,
 			ResReq:       module.PreBuild.ResReq,
+			ResReqSpec:   module.PreBuild.ResReqSpec,
 			Timeout:      module.Timeout,
 			Registries:   registries,
 			ProductName:  args.ProductName,
+			Namespace:    module.PreBuild.Namespace,
+			ClusterID:    module.PreBuild.ClusterID,
+		}
+
+		clusterInfo, err := commonrepo.NewK8SClusterColl().Get(module.PreBuild.ClusterID)
+		if err != nil {
+			return nil, e.ErrConvertSubTasks.AddErr(err)
+		}
+		build.Cache = clusterInfo.Cache
+
+		// If the cluster is not configured with a cache medium, the cache cannot be used, so don't enable cache explicitly.
+		if build.Cache.MediumType == "" {
+			build.CacheEnable = false
+		} else {
+			build.CacheEnable = module.CacheEnable
+			build.CacheDirType = module.CacheDirType
+			build.CacheUserDir = module.CacheUserDir
 		}
 
 		if args.TaskType != "" {
@@ -1580,7 +1886,6 @@ func BuildModuleToSubTasks(args *commonmodels.BuildModuleArgs, log *zap.SugaredL
 		}
 
 		if serviceTmpl != nil {
-			build.Namespace = args.Env.Namespace
 			build.ServiceType = setting.PMDeployType
 			envHost := make(map[string][]string)
 			for _, envConfig := range serviceTmpl.EnvConfigs {
@@ -1630,7 +1935,7 @@ func BuildModuleToSubTasks(args *commonmodels.BuildModuleArgs, log *zap.SugaredL
 				//私钥信息可能被更新，而构建中存储的信息是旧的，需要根据id获取最新的私钥信息
 				latestKeyInfo, err := commonrepo.NewPrivateKeyColl().Find(commonrepo.FindPrivateKeyOption{ID: sshID})
 				if err != nil || latestKeyInfo == nil {
-					log.Errorf("PrivateKey.Find failed, id:%s, err:%v", sshID, err)
+					log.Errorf("PrivateKey.Find failed, id:%s, err:%s", sshID, err)
 					continue
 				}
 				ssh := new(task.SSH)
@@ -1667,12 +1972,18 @@ func BuildModuleToSubTasks(args *commonmodels.BuildModuleArgs, log *zap.SugaredL
 		build.JobCtx.EnableProxy = module.PreBuild.EnableProxy
 
 		if module.PostBuild != nil && module.PostBuild.DockerBuild != nil {
+			dockerTemplateContent := ""
+			if module.PostBuild.DockerBuild.TemplateID != "" {
+				if dockerfileDetail, err := templ.GetDockerfileTemplateDetail(module.PostBuild.DockerBuild.TemplateID, log); err == nil {
+					dockerTemplateContent = dockerfileDetail.Content
+				}
+			}
 			build.JobCtx.DockerBuildCtx = &task.DockerBuildCtx{
-				Source:     module.PostBuild.DockerBuild.Source,
-				TemplateID: module.PostBuild.DockerBuild.TemplateID,
-				WorkDir:    module.PostBuild.DockerBuild.WorkDir,
-				DockerFile: module.PostBuild.DockerBuild.DockerFile,
-				BuildArgs:  module.PostBuild.DockerBuild.BuildArgs,
+				Source:                module.PostBuild.DockerBuild.Source,
+				WorkDir:               module.PostBuild.DockerBuild.WorkDir,
+				DockerFile:            module.PostBuild.DockerBuild.DockerFile,
+				BuildArgs:             module.PostBuild.DockerBuild.BuildArgs,
+				DockerTemplateContent: dockerTemplateContent,
 			}
 		}
 
@@ -1736,7 +2047,7 @@ func ensurePipelineTask(pt *task.Task, envName string, log *zap.SugaredLogger) e
 
 		switch pre.TaskType {
 
-		case config.TaskBuild, config.TaskArtifactDeploy:
+		case config.TaskBuild, config.TaskArtifactDeploy, config.TaskBuildV3:
 			t, err := base.ToBuildTask(subTask)
 			fmtBuildsTask(t, log)
 			if err != nil {
@@ -1756,7 +2067,6 @@ func ensurePipelineTask(pt *task.Task, envName string, log *zap.SugaredLogger) e
 				//		}
 				//	}
 				//}
-
 				// 设置Pipeline对应的服务名称
 				if t.ServiceName != "" {
 					pt.ServiceName = t.ServiceName
@@ -1776,16 +2086,33 @@ func ensurePipelineTask(pt *task.Task, envName string, log *zap.SugaredLogger) e
 					setManunalBuilds(t.JobCtx.Builds, pt.TaskArgs.Builds, log)
 				}
 
+				opt := &commonrepo.ProductFindOptions{EnvName: envName, Name: pt.ProductName}
+				exitedProd, err := commonrepo.NewProductColl().Find(opt)
+				if err != nil {
+					log.Errorf("can't find product by envName:%s error msg: %v", envName, err)
+					return e.ErrFindRegistry.AddDesc(err.Error())
+				}
+
 				// 生成默认镜像tag后缀
 				//pt.TaskArgs.Deploy.Tag = releaseCandidate(t, pt.TaskID, pt.ProductName, pt.EnvName, "image")
 
 				// 设置镜像名称
 				// 编译任务使用 t.JobCtx.Image
 				// 注意: 其他任务从 pt.TaskArgs.Deploy.Image 获取, 必须要有编译任务
-				reg, err := commonservice.FindDefaultRegistry(log)
-				if err != nil {
-					log.Errorf("can't find default candidate registry: %v", err)
-					return e.ErrFindRegistry.AddDesc(err.Error())
+				var reg *commonmodels.RegistryNamespace
+				if len(exitedProd.RegistryID) > 0 {
+					reg, _, err = commonservice.FindRegistryById(exitedProd.RegistryID, true, log)
+					if err != nil {
+						log.Errorf("service.EnsureRegistrySecret: failed to find registry: %s error msg:%v",
+							exitedProd.RegistryID, err)
+						return e.ErrFindRegistry.AddDesc(err.Error())
+					}
+				} else {
+					reg, _, err = commonservice.FindDefaultRegistry(true, log)
+					if err != nil {
+						log.Errorf("can't find default candidate registry: %v", err)
+						return e.ErrFindRegistry.AddDesc(err.Error())
+					}
 				}
 
 				t.JobCtx.Image = GetImage(reg, releaseCandidate(t, pt.TaskID, pt.ProductName, envName, "image"))
@@ -1830,10 +2157,14 @@ func ensurePipelineTask(pt *task.Task, envName string, log *zap.SugaredLogger) e
 				//		}
 				//	}
 				//}
+				registryRepo := reg.RegAddr + "/" + reg.Namespace
+				if reg.RegProvider == config.RegistryTypeAWS {
+					registryRepo = reg.RegAddr
+				}
 
 				t.DockerBuildStatus = &task.DockerBuildStatus{
 					ImageName:    t.JobCtx.Image,
-					RegistryRepo: reg.RegAddr + "/" + reg.Namespace,
+					RegistryRepo: registryRepo,
 				}
 				t.UTStatus = &task.UTStatus{}
 				t.StaticCheckStatus = &task.StaticCheckStatus{}
@@ -1886,7 +2217,11 @@ func ensurePipelineTask(pt *task.Task, envName string, log *zap.SugaredLogger) e
 					pt.TaskArgs = &commonmodels.TaskArgs{PipelineName: pt.WorkflowArgs.WorkflowName, TaskCreator: pt.WorkflowArgs.WorkflowTaskCreator}
 				}
 				registry := pt.ConfigPayload.RepoConfigs[pt.WorkflowArgs.RegistryID]
-				t.Image = fmt.Sprintf("%s/%s/%s", util.GetURLHostName(registry.RegAddr), registry.Namespace, t.Image)
+				if registry.RegProvider == config.RegistryTypeAWS {
+					t.Image = fmt.Sprintf("%s/%s", util.TrimURLScheme(registry.RegAddr), t.Image)
+				} else {
+					t.Image = fmt.Sprintf("%s/%s/%s", util.TrimURLScheme(registry.RegAddr), registry.Namespace, t.Image)
+				}
 				pt.TaskArgs.Deploy.Image = t.Image
 				t.RegistryID = pt.WorkflowArgs.RegistryID
 
@@ -2092,7 +2427,7 @@ func ensurePipelineTask(pt *task.Task, envName string, log *zap.SugaredLogger) e
 				for _, repoImage := range t.Releases {
 					if v, ok := pt.ConfigPayload.RepoConfigs[repoImage.RepoID]; ok {
 						repoImage.Name = util.ReplaceRepo(pt.TaskArgs.Deploy.Image, v.RegAddr, v.Namespace)
-						repoImage.Host = util.GetURLHostName(v.RegAddr)
+						repoImage.Host = util.TrimURLScheme(v.RegAddr)
 						repoImage.Namespace = v.Namespace
 						repos = append(repos, repoImage)
 					}
@@ -2146,7 +2481,22 @@ func ensurePipelineTask(pt *task.Task, envName string, log *zap.SugaredLogger) e
 				}
 			}
 		case config.TaskDistribute:
-			// 为了兼容历史数据类型，目前什么都不用做，避免出错
+		// do nothing
+		case config.TaskTrigger:
+			t, err := base.ToTriggerTask(subTask)
+			if err != nil {
+				log.Error(err)
+				return err
+			}
+
+			if t.Enabled {
+				pt.SubTasks[i], err = t.ToSubTask()
+				if err != nil {
+					return err
+				}
+			}
+		case config.TaskArtifactPackage:
+			// do nothing
 		default:
 			return e.NewErrInvalidTaskType(string(pre.TaskType))
 		}

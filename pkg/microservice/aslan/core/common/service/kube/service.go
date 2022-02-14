@@ -30,27 +30,27 @@ import (
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
+	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
+	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/pkg/setting"
+	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	"github.com/koderover/zadig/pkg/tool/crypto"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/kube/multicluster"
 )
 
-func GetKubeClient(clusterID string) (client.Client, error) {
-	return multicluster.GetKubeClient(config.HubServerAddress(), clusterID)
-}
-
 func GetKubeAPIReader(clusterID string) (client.Reader, error) {
-	return multicluster.GetKubeAPIReader(config.HubServerAddress(), clusterID)
+	return kubeclient.GetKubeAPIReader(config.HubServerAddress(), clusterID)
 }
 
 func GetRESTConfig(clusterID string) (*rest.Config, error) {
-	return multicluster.GetRESTConfig(config.HubServerAddress(), clusterID)
+	return kubeclient.GetRESTConfig(config.HubServerAddress(), clusterID)
 }
 
 // GetClientset returns a client to interact with APIServer which implements kubernetes.Interface
 func GetClientset(clusterID string) (kubernetes.Interface, error) {
-	return multicluster.GetClientset(config.HubServerAddress(), clusterID)
+	return kubeclient.GetClientset(config.HubServerAddress(), clusterID)
 }
 
 type Service struct {
@@ -96,20 +96,33 @@ func (s *Service) ListClusters(clusterType string, logger *zap.SugaredLogger) ([
 	return clusters, nil
 }
 
-func (s *Service) CreateCluster(cluster *models.K8SCluster, logger *zap.SugaredLogger) (*models.K8SCluster, error) {
+func (s *Service) CreateCluster(cluster *models.K8SCluster, id string, logger *zap.SugaredLogger) (*models.K8SCluster, error) {
 	_, err := s.coll.FindByName(cluster.Name)
-
 	if err == nil {
 		logger.Errorf("failed to create cluster %s %v", cluster.Name, err)
 		return nil, e.ErrCreateCluster.AddDesc(e.DuplicateClusterNameFound)
 	}
-
-	cluster.Status = config.Pending
-
-	err = s.coll.Create(cluster)
-
+	cluster.Status = setting.Pending
+	if id == setting.LocalClusterID {
+		cluster.Status = setting.Normal
+		cluster.Local = true
+	}
+	err = s.coll.Create(cluster, id)
 	if err != nil {
 		return nil, e.ErrCreateCluster.AddErr(err)
+	}
+
+	if cluster.AdvancedConfig != nil {
+		for _, projectName := range cluster.AdvancedConfig.ProjectNames {
+			err = commonrepo.NewProjectClusterRelationColl().Create(&commonmodels.ProjectClusterRelation{
+				ProjectName: projectName,
+				ClusterID:   cluster.ID.Hex(),
+				CreatedBy:   cluster.CreatedBy,
+			})
+			if err != nil {
+				logger.Errorf("Failed to create projectClusterRelation err:%s", err)
+			}
+		}
 	}
 
 	token, err := crypto.AesEncrypt(cluster.ID.Hex())
@@ -135,7 +148,7 @@ func (s *Service) UpdateCluster(id string, cluster *models.K8SCluster, logger *z
 		return nil, e.ErrUpdateCluster.AddDesc(e.DuplicateClusterNameFound)
 	}
 
-	err = s.coll.UpdateMutableFields(cluster)
+	err = s.coll.UpdateMutableFields(cluster, id)
 	if err != nil {
 		logger.Errorf("failed to update mutable fields %v", err)
 		return nil, e.ErrUpdateCluster.AddErr(err)
@@ -208,7 +221,7 @@ func (s *Service) ListConnectedClusters(logger *zap.SugaredLogger) ([]*models.K8
 	return clusters, nil
 }
 
-func (s *Service) GetYaml(id, agentImage, aslanURL, hubURI string, useDeployment bool, logger *zap.SugaredLogger) ([]byte, error) {
+func (s *Service) GetYaml(id, agentImage, rsImage, aslanURL, hubURI string, useDeployment bool, logger *zap.SugaredLogger) ([]byte, error) {
 	var (
 		cluster *models.K8SCluster
 		err     error
@@ -237,18 +250,20 @@ func (s *Service) GetYaml(id, agentImage, aslanURL, hubURI string, useDeployment
 
 	if cluster.Namespace == "" {
 		err = YamlTemplate.Execute(buffer, TemplateSchema{
-			HubAgentImage:     agentImage,
-			ClientToken:       token,
-			HubServerBaseAddr: hubBase.String(),
-			UseDeployment:     useDeployment,
+			HubAgentImage:       agentImage,
+			ResourceServerImage: rsImage,
+			ClientToken:         token,
+			HubServerBaseAddr:   hubBase.String(),
+			UseDeployment:       useDeployment,
 		})
 	} else {
 		err = YamlTemplateForNamespace.Execute(buffer, TemplateSchema{
-			HubAgentImage:     agentImage,
-			ClientToken:       token,
-			HubServerBaseAddr: hubBase.String(),
-			UseDeployment:     useDeployment,
-			Namespace:         cluster.Namespace,
+			HubAgentImage:       agentImage,
+			ResourceServerImage: rsImage,
+			ClientToken:         token,
+			HubServerBaseAddr:   hubBase.String(),
+			UseDeployment:       useDeployment,
+			Namespace:           cluster.Namespace,
 		})
 	}
 
@@ -260,11 +275,12 @@ func (s *Service) GetYaml(id, agentImage, aslanURL, hubURI string, useDeployment
 }
 
 type TemplateSchema struct {
-	HubAgentImage     string
-	ClientToken       string
-	HubServerBaseAddr string
-	Namespace         string
-	UseDeployment     bool
+	HubAgentImage       string
+	ResourceServerImage string
+	ClientToken         string
+	HubServerBaseAddr   string
+	Namespace           string
+	UseDeployment       bool
 }
 
 var YamlTemplate = template.Must(template.New("agentYaml").Parse(`
@@ -373,13 +389,138 @@ spec:
             memory: 1Gi
           requests:
             cpu: 100m
-            memory: 256Mi 
+            memory: 256Mi
 {{- if .UseDeployment }}
   replicas: 1
 {{- else }}
   updateStrategy:
     type: RollingUpdate
 {{- end }}
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resource-server
+  namespace: koderover-agent
+  labels:
+    app.kubernetes.io/component: resource-server
+    app.kubernetes.io/name: zadig
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: resource-server
+      app.kubernetes.io/name: zadig
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: resource-server
+        app.kubernetes.io/name: zadig
+    spec:
+      containers:
+        - image: {{.ResourceServerImage}}
+          imagePullPolicy: Always
+          name: resource-server
+          resources:
+            limits:
+              cpu: 500m
+              memory: 500Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: resource-server
+  namespace: koderover-agent
+  labels:
+    app.kubernetes.io/component: resource-server
+    app.kubernetes.io/name: zadig
+spec:
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  selector:
+    app.kubernetes.io/component: resource-server
+    app.kubernetes.io/name: zadig
+
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dind
+  namespace: koderover-agent
+  labels:
+    app.kubernetes.io/component: dind
+    app.kubernetes.io/name: zadig
+spec:
+  serviceName: dind
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: dind
+      app.kubernetes.io/name: zadig
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: dind
+        app.kubernetes.io/name: zadig
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: dind
+          image: ccr.ccs.tencentyun.com/koderover-public/library-docker:stable-dind
+          args:
+            - --mtu=1376
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          securityContext:
+            privileged: true
+          ports:
+            - protocol: TCP
+              containerPort: 2375
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: dind
+  namespace: koderover-agent
+  labels:
+    app.kubernetes.io/component: dind
+    app.kubernetes.io/name: zadig
+spec:
+  ports:
+    - name: dind
+      protocol: TCP
+      port: 2375
+      targetPort: 2375
+  clusterIP: None
+  selector:
+    app.kubernetes.io/component: dind
+    app.kubernetes.io/name: zadig
 `))
 
 var YamlTemplateForNamespace = template.Must(template.New("agentYaml").Parse(`
@@ -478,11 +619,137 @@ spec:
             memory: 1Gi
           requests:
             cpu: 100m
-            memory: 256Mi 
+            memory: 256Mi
 {{- if .UseDeployment }}
   replicas: 1
 {{- else }}
   updateStrategy:
     type: RollingUpdate
 {{- end }}
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resource-server
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/component: resource-server
+    app.kubernetes.io/name: zadig
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: resource-server
+      app.kubernetes.io/name: zadig
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: resource-server
+        app.kubernetes.io/name: zadig
+    spec:
+      containers:
+        - image: {{.ResourceServerImage}}
+          imagePullPolicy: Always
+          name: resource-server
+          resources:
+            limits:
+              cpu: 500m
+              memory: 500Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: resource-server
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/component: resource-server
+    app.kubernetes.io/instance: zadig-zadig
+    app.kubernetes.io/name: zadig
+spec:
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  selector:
+    app.kubernetes.io/component: resource-server
+    app.kubernetes.io/name: zadig
+
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dind
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/component: dind
+    app.kubernetes.io/name: zadig
+spec:
+  serviceName: dind
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: dind
+      app.kubernetes.io/name: zadig
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: dind
+        app.kubernetes.io/name: zadig
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: dind
+          image: ccr.ccs.tencentyun.com/koderover-public/library-docker:stable-dind
+          args:
+            - --mtu=1376
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          securityContext:
+            privileged: true
+          ports:
+            - protocol: TCP
+              containerPort: 2375
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: dind
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/component: dind
+    app.kubernetes.io/name: zadig
+spec:
+  ports:
+    - name: dind
+      protocol: TCP
+      port: 2375
+      targetPort: 2375
+  clusterIP: None
+  selector:
+    app.kubernetes.io/component: dind
+    app.kubernetes.io/name: zadig
 `))

@@ -32,26 +32,36 @@ type Build struct {
 	// 在任一编译配置模板中只能出现一次
 	// 对于k8s部署是传入容器名称
 	// 对于物理机部署是服务名称
-	Targets         []*ServiceModuleTarget `bson:"targets"                       json:"targets"`
-	Description     string                 `bson:"desc,omitempty"                json:"desc"`
-	UpdateTime      int64                  `bson:"update_time"                   json:"update_time"`
-	UpdateBy        string                 `bson:"update_by"                     json:"update_by"`
-	Repos           []*types.Repository    `bson:"repos"                         json:"repos"`
-	PreBuild        *PreBuild              `bson:"pre_build"                     json:"pre_build"`
-	JenkinsBuild    *JenkinsBuild          `bson:"jenkins_build,omitempty"       json:"jenkins_build,omitempty"`
-	Scripts         string                 `bson:"scripts"                       json:"scripts"`
-	PostBuild       *PostBuild             `bson:"post_build,omitempty"          json:"post_build"`
-	Caches          []string               `bson:"caches"                        json:"caches"`
-	ProductName     string                 `bson:"product_name"                  json:"product_name"`
-	SSHs            []string               `bson:"sshs,omitempty"                json:"sshs,omitempty"`
-	PMDeployScripts string                 `bson:"pm_deploy_scripts"             json:"pm_deploy_scripts"`
+	Targets      []*ServiceModuleTarget `bson:"targets"                       json:"targets"`
+	Description  string                 `bson:"desc,omitempty"                json:"desc"`
+	UpdateTime   int64                  `bson:"update_time"                   json:"update_time"`
+	UpdateBy     string                 `bson:"update_by"                     json:"update_by"`
+	Repos        []*types.Repository    `bson:"repos"                         json:"repos"`
+	PreBuild     *PreBuild              `bson:"pre_build"                     json:"pre_build"`
+	JenkinsBuild *JenkinsBuild          `bson:"jenkins_build,omitempty"       json:"jenkins_build,omitempty"`
+	Scripts      string                 `bson:"scripts"                       json:"scripts"`
+	PostBuild    *PostBuild             `bson:"post_build,omitempty"          json:"post_build"`
+
+	// TODO: Deprecated.
+	Caches []string `bson:"caches"                        json:"caches"`
+
+	ProductName     string   `bson:"product_name"                  json:"product_name"`
+	SSHs            []string `bson:"sshs,omitempty"                json:"sshs,omitempty"`
+	PMDeployScripts string   `bson:"pm_deploy_scripts"             json:"pm_deploy_scripts"`
+
+	// New since V1.10.0.
+	CacheEnable  bool               `bson:"cache_enable"        json:"cache_enable"`
+	CacheDirType types.CacheDirType `bson:"cache_dir_type"      json:"cache_dir_type"`
+	CacheUserDir string             `bson:"cache_user_dir"      json:"cache_user_dir"`
 }
 
 // PreBuild prepares an environment for a job
 type PreBuild struct {
+	// TODO: Deprecated.
 	CleanWorkspace bool `bson:"clean_workspace"            json:"clean_workspace"`
 	// ResReq defines job requested resources
-	ResReq setting.Request `bson:"res_req"                json:"res_req"`
+	ResReq     setting.Request     `bson:"res_req"                json:"res_req"`
+	ResReqSpec setting.RequestSpec `bson:"res_req_spec"           json:"res_req_spec"`
 	// BuildOS defines job image OS, it supports 12.04, 14.04, 16.04
 	BuildOS   string `bson:"build_os"                      json:"build_os"`
 	ImageFrom string `bson:"image_from"                    json:"image_from"`
@@ -65,7 +75,11 @@ type PreBuild struct {
 	// Parameters
 	Parameters []*Parameter `bson:"parameters,omitempty"   json:"parameters"`
 	// UploadPkg uploads package to s3
-	UploadPkg bool `bson:"upload_pkg"                      json:"upload_pkg"`
+	UploadPkg bool   `bson:"upload_pkg"                      json:"upload_pkg"`
+	ClusterID string `bson:"cluster_id"                      json:"cluster_id"`
+
+	// TODO: Deprecated.
+	Namespace string `bson:"namespace"                       json:"namespace"`
 }
 
 type BuildObj struct {
@@ -133,9 +147,11 @@ type ServiceModuleTarget struct {
 }
 
 type KeyVal struct {
-	Key          string `bson:"key"                 json:"key"`
-	Value        string `bson:"value"               json:"value"`
-	IsCredential bool   `bson:"is_credential"       json:"is_credential"`
+	Key          string               `bson:"key"                           json:"key"`
+	Value        string               `bson:"value"                         json:"value"`
+	Type         ParameterSettingType `bson:"type,omitempty"                json:"type,omitempty"`
+	ChoiceOption []string             `bson:"choice_option,omitempty"       json:"choice_option,omitempty"`
+	IsCredential bool                 `bson:"is_credential"                 json:"is_credential"`
 }
 
 type Item struct {
