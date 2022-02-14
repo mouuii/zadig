@@ -7,13 +7,13 @@ Backend:
   replicaCount: 1
   image:
     repository: ccr.ccs.tencentyun.com/trial/backend
-    tag: "demo1"
+    tag: "20220214-demo1"
 
 Frontend:
   replicaCount: 1
   image: 
     repository: ccr.ccs.tencentyun.com/trial/frontend
-    tag: "demo1"
+    tag: "20220214-demo1"
 
 domain: demo.domain.com
 port: 20219
