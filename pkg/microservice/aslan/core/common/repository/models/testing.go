@@ -30,7 +30,7 @@ type Testing struct {
 	Desc        string              `bson:"desc"                     json:"desc"`
 	Timeout     int                 `bson:"timeout"                  json:"timeout"`
 	Team        string              `bson:"team"                     json:"team"`
-	Repos       []*types.Repository `bson:"repos,omitempty"          json:"repos"`
+	Repos       []*types.Repository `bson:"repos"                    json:"repos"`
 	PreTest     *PreTest            `bson:"pre_test"                 json:"pre_test"`
 	Scripts     string              `bson:"scripts"                  json:"scripts"`
 	UpdateTime  int64               `bson:"update_time"              json:"update_time"`
@@ -57,9 +57,11 @@ type Testing struct {
 	ScheduleEnabled bool             `bson:"schedule_enabled"         json:"-"`
 
 	// New since V1.10.0.
-	CacheEnable  bool               `bson:"cache_enable"        json:"cache_enable"`
-	CacheDirType types.CacheDirType `bson:"cache_dir_type"      json:"cache_dir_type"`
-	CacheUserDir string             `bson:"cache_user_dir"      json:"cache_user_dir"`
+	CacheEnable  bool               `bson:"cache_enable"              json:"cache_enable"`
+	CacheDirType types.CacheDirType `bson:"cache_dir_type"            json:"cache_dir_type"`
+	CacheUserDir string             `bson:"cache_user_dir"            json:"cache_user_dir"`
+	// New since V1.10.0. Only to tell the webpage should the advanced settings be displayed
+	AdvancedSettingsModified bool `bson:"advanced_setting_modified" json:"advanced_setting_modified"`
 }
 
 type TestingHookCtrl struct {

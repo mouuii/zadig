@@ -39,6 +39,7 @@ import (
 	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	s3tool "github.com/koderover/zadig/pkg/tool/s3"
+	commontypes "github.com/koderover/zadig/pkg/types"
 	"github.com/koderover/zadig/pkg/util"
 )
 
@@ -193,6 +194,12 @@ func (p *TestPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 	fileName = strings.Replace(strings.ToLower(fileName), "_", "-", -1)
 	testReportFile = strings.Replace(strings.ToLower(testReportFile), "_", "-", -1)
 
+	// Since we allow users to use custom environment variables, variable resolution is required.
+	if pipelineCtx.CacheEnable && pipelineCtx.Cache.MediumType == commontypes.NFSMedium &&
+		pipelineCtx.CacheDirType == commontypes.UserDefinedCacheDir {
+		pipelineCtx.CacheUserDir = p.renderEnv(pipelineCtx.CacheUserDir)
+	}
+
 	jobCtx := JobCtxBuilder{
 		JobName:        p.JobName,
 		PipelineCtx:    pipelineCtx,
@@ -296,17 +303,17 @@ func (p *TestPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serv
 		PipelineType: string(pipelineTask.Type),
 	}
 
-	// 日志保存失败与否都清理job
+	// Clean up tasks that user canceled or timed out.
 	defer func() {
-		if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
-			p.Log.Error(err)
-			p.Task.Error = err.Error()
-		}
-		if err := ensureDeleteConfigMap(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
-			p.Log.Error(err)
-			p.Task.Error = err.Error()
-		}
-		return
+		go func() {
+			if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+				p.Log.Error(err)
+			}
+
+			if err := ensureDeleteConfigMap(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+				p.Log.Error(err)
+			}
+		}()
 	}()
 
 	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.Task.ClusterID, p.FileName, jobLabel, p.kubeClient)
@@ -330,9 +337,6 @@ func (p *TestPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serv
 
 	//如果用户配置了测试结果目录需要收集,则下载测试结果,发送到aslan server
 	//Note here: p.Task.TestName目前只有默认值test
-	if p.Task.JobCtx.TestResultPath == "" {
-		return
-	}
 
 	testReport := new(types.TestReport)
 	if pipelineTask.TestReports == nil {
@@ -359,10 +363,12 @@ func (p *TestPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serv
 	}
 	s3client, err := s3tool.NewClient(store.Endpoint, store.Ak, store.Sk, store.Insecure, forcedPathStyle)
 	if err == nil {
-		prefix := store.GetObjectPath("/")
-		if files, err := s3client.ListFiles(store.Bucket, prefix, true); err == nil {
-			if len(files) > 0 {
-				p.Task.JobCtx.IsHasArtifact = true
+		if len(p.Task.JobCtx.ArtifactPaths) > 0 {
+			prefix := store.GetObjectPath("/")
+			if files, err := s3client.ListFiles(store.Bucket, prefix, true); err == nil {
+				if len(files) > 0 {
+					p.Task.JobCtx.IsHasArtifact = true
+				}
 			}
 		}
 	}
@@ -382,7 +388,7 @@ func (p *TestPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serv
 		return
 	}
 
-	if p.Task.JobCtx.TestType == setting.FunctionTest {
+	if p.Task.JobCtx.TestType == setting.FunctionTest && p.Task.JobCtx.TestResultPath != "" {
 		b, err := os.ReadFile(tmpFilename)
 		if err != nil {
 			p.Log.Error(fmt.Sprintf("get test result file error: %v", err))
@@ -526,4 +532,22 @@ func (p *TestPlugin) IsTaskEnabled() bool {
 
 func (p *TestPlugin) ResetError() {
 	p.Task.Error = ""
+}
+
+// Note: Since there are few environment variables and few variables to be replaced,
+// this method is temporarily used.
+func (p *TestPlugin) renderEnv(data string) string {
+	mapper := func(data string) string {
+		for _, envar := range p.Task.JobCtx.EnvVars {
+			if data != envar.Key {
+				continue
+			}
+
+			return envar.Value
+		}
+
+		return fmt.Sprintf("$%s", data)
+	}
+
+	return os.Expand(data, mapper)
 }

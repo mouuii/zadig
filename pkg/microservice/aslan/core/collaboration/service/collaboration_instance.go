@@ -221,6 +221,7 @@ func genCollaborationInstance(mode models.CollaborationMode, projectName, uid, i
 		UserUID:           uid,
 		PolicyName:        buildPolicyName(projectName, mode.Name, identityType, userName),
 		Revision:          mode.Revision,
+		RecycleDay:        mode.RecycleDay,
 		Workflows:         workflows,
 		Products:          products,
 		LastVisitTime:     time.Now().Unix(),
@@ -259,9 +260,10 @@ func getDiff(cmMap map[string]*models.CollaborationMode, ciMap map[string]*model
 	}, nil
 }
 
-func updateVisitTime(uid string, cis []models.CollaborationInstance, logger *zap.SugaredLogger) error {
+func updateVisitTime(uid string, cis []*models.CollaborationInstance, logger *zap.SugaredLogger) error {
 	for _, instance := range cis {
-		err := mongodb.NewCollaborationInstanceColl().Update(uid, &instance)
+		instance.LastVisitTime = time.Now().Unix()
+		err := mongodb.NewCollaborationInstanceColl().Update(uid, instance)
 		if err != nil {
 			logger.Errorf("syncInstance Update error, error msg:%s", err)
 			return err
@@ -300,7 +302,11 @@ func GetCollaborationUpdate(projectName, uid, identityType, userName string, log
 		logger.Errorf("GetCollaborationUpdate error, err msg:%s", err)
 		return nil, err
 	}
-
+	err = updateVisitTime(uid, collaborationInstances, logger)
+	if err != nil {
+		logger.Errorf("GetCollaborationUpdate updateVisitTime error, err msg:%s", err)
+		return nil, err
+	}
 	return resp, nil
 }
 
@@ -1114,7 +1120,7 @@ func getCollaborationNew(updateResp *GetCollaborationUpdateResp, projectName, id
 	if renderSets != nil {
 		productRenderSetMap := make(map[string]models2.RenderSet)
 		for _, set := range renderSets {
-			productRenderSetMap[set.EnvName] = set
+			productRenderSetMap[set.EnvName] = *set
 		}
 		for _, product := range newProduct {
 			set, ok := productRenderSetMap[product.BaseName]
@@ -1124,7 +1130,17 @@ func getCollaborationNew(updateResp *GetCollaborationUpdateResp, projectName, id
 
 			product.Vars = set.KVs
 			product.DefaultValues = set.DefaultValues
-			product.ChartValues = buildRenderChartArg(set.ChartInfos, product.BaseName)
+		}
+	}
+	if len(newProduct) > 0 && newProduct[0].DeployType == setting.HelmDeployType {
+		envChartsMap := getHelmRenderSet(projectName, newProductName.List(), logger)
+		for _, product := range newProduct {
+			chart, ok := envChartsMap[product.BaseName]
+			if !ok {
+				return nil, fmt.Errorf("product:%s not exist", product.BaseName)
+			}
+
+			product.ChartValues = chart
 		}
 	}
 	var workNames []string
@@ -1161,6 +1177,119 @@ func getCollaborationNew(updateResp *GetCollaborationUpdateResp, projectName, id
 	}, nil
 }
 
+type DeleteCIResourcesRequest struct {
+	CollaborationInstances []models.CollaborationInstance `json:"collaboration_instances"`
+}
+
+func CleanCIResources(userName, requestID string, logger *zap.SugaredLogger) error {
+	cis, err := mongodb.NewCollaborationInstanceColl().List(&mongodb.CollaborationInstanceFindOptions{})
+	if err != nil {
+		return err
+	}
+	var fileterdInstances []*models.CollaborationInstance
+	for _, ci := range cis {
+
+		if ci.RecycleDay != 0 && ((time.Now().Unix()-ci.LastVisitTime)/60 > ci.RecycleDay*24*60) {
+			fileterdInstances = append(fileterdInstances, ci)
+		}
+	}
+	return DeleteCIResources(userName, requestID, fileterdInstances, logger)
+}
+
+func DeleteCIResources(userName, requestID string, cis []*models.CollaborationInstance, logger *zap.SugaredLogger) error {
+	var names string
+	var policyNames []string
+	if len(cis) == 0 {
+		return nil
+	}
+	var findOpts []mongodb.CollaborationInstanceFindOptions
+
+	for _, ci := range cis {
+		findOpts = append(findOpts, mongodb.CollaborationInstanceFindOptions{
+			ProjectName: ci.ProjectName,
+			Name:        ci.CollaborationName,
+			UserUID:     ci.UserUID,
+		})
+		policyNames = append(policyNames, ci.PolicyName)
+	}
+
+	err := mongodb.NewCollaborationInstanceColl().BulkDelete(mongodb.CollaborationInstanceListOptions{
+		FindOpts: findOpts,
+	})
+	if err != nil {
+		logger.Errorf("BulkDelete CollaborationInstance error:%s", err)
+		return err
+	}
+	names = cis[0].PolicyName
+	for i := 1; i < len(cis); i++ {
+		names = names + "," + cis[i].PolicyName
+	}
+	res, err := policy.NewDefault().GetPolicies(names)
+	if err != nil {
+		return err
+	}
+
+	var labels []mongodb2.Label
+	labelSet := sets.String{}
+	for _, re := range res {
+		for _, rule := range re.Rules {
+			for _, attribute := range rule.MatchAttributes {
+				if attribute.Key != "placeholder" && attribute.Key != "production" &&
+					!labelSet.Has(attribute.Key+"-"+attribute.Value) {
+					labels = append(labels, mongodb2.Label{
+						Key:   attribute.Key,
+						Value: attribute.Value,
+					})
+					labelSet.Insert(attribute.Key + "-" + attribute.Value)
+				}
+			}
+		}
+	}
+
+	labelRes, err := service.ListLabels(&service.ListLabelsArgs{
+		Labels: labels,
+	})
+	if err != nil {
+		return err
+	}
+	var labelIds []string
+	for _, l := range labelRes.Labels {
+		labelIds = append(labelIds, l.ID.Hex())
+	}
+
+	err = service.DeleteLabels(labelIds, true, logger)
+	if err != nil {
+		return err
+	}
+	for _, ci := range cis {
+		for _, workflow := range ci.Workflows {
+			if workflow.CollaborationType == config.CollaborationNew {
+				err = commonservice.DeleteWorkflow(workflow.Name, requestID, false, logger)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		for _, product := range ci.Products {
+			if product.CollaborationType == config.CollaborationNew {
+				err = commonservice.DeleteProduct(userName, product.Name, ci.ProjectName, requestID, logger)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	err = policy.NewDefault().DeletePolicies("", policy.DeletePoliciesArgs{
+		Names: policyNames,
+	})
+	if err != nil {
+		logger.Errorf("BulkDelete policy error:%s", err)
+		return err
+	}
+
+	return nil
+}
+
 func GetCollaborationNew(projectName, uid, identityType, userName string, logger *zap.SugaredLogger) (*GetCollaborationNewResp, error) {
 	updateResp, err := GetCollaborationUpdate(projectName, uid, identityType, userName, logger)
 	if err != nil {
@@ -1170,7 +1299,7 @@ func GetCollaborationNew(projectName, uid, identityType, userName string, logger
 	return getCollaborationNew(updateResp, projectName, identityType, userName, logger)
 }
 
-func getRenderSet(projectName string, envs []string) ([]models2.RenderSet, error) {
+func getRenderSet(projectName string, envs []string) ([]*models2.RenderSet, error) {
 	products, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
 		InProjects: []string{projectName},
 		InEnvs:     envs,
@@ -1185,9 +1314,8 @@ func getRenderSet(projectName string, envs []string) ([]models2.RenderSet, error
 			Name:     product.Namespace,
 		})
 	}
-	renderSets, err := commonrepo.NewRenderSetColl().ListByFindOpts(&commonrepo.RenderSetListOption{
+	renderSets, err := commonrepo.NewRenderSetColl().List(&commonrepo.RenderSetListOption{
 		ProductTmpl: projectName,
-		FindOpts:    findOpts,
 	})
 	if err != nil {
 		return nil, err
@@ -1195,13 +1323,16 @@ func getRenderSet(projectName string, envs []string) ([]models2.RenderSet, error
 	return renderSets, nil
 }
 
-func buildRenderChartArg(chartInfos []*templatemodels.RenderChart, envName string) []*commonservice.RenderChartArg {
-	ret := make([]*commonservice.RenderChartArg, 0, len(chartInfos))
-	for _, singleChart := range chartInfos {
-		rcaObj := new(commonservice.RenderChartArg)
-		rcaObj.LoadFromRenderChartModel(singleChart)
-		rcaObj.EnvName = envName
-		ret = append(ret, rcaObj)
+func getHelmRenderSet(projectName string, envs []string, logger *zap.SugaredLogger) map[string][]*commonservice.RenderChartArg {
+	envChartsMap := make(map[string][]*commonservice.RenderChartArg)
+	for _, env := range envs {
+		renderChartArgs, err := commonservice.GetRenderCharts(projectName, env, "", logger)
+		if err != nil {
+			logger.Errorf("GetRenderCharts error:%s", err)
+			continue
+		}
+		envChartsMap[env] = renderChartArgs
 	}
-	return ret
+
+	return envChartsMap
 }

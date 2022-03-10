@@ -1,6 +1,8 @@
 package gin
 
 import (
+	"strings"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/collaboration/service"
@@ -13,7 +15,12 @@ func GetCollaborationNew() gin.HandlerFunc {
 		defer func() { internalhandler.JSONResponse(c, ctx) }()
 
 		projectName := c.Query("projectName")
-		if projectName == "" || c.Request.URL.Path == "/api/collaboration/collaborations/sync" {
+		ifPassFilter := c.Query("ifPassFilter")
+		if ifPassFilter == "true" ||
+			projectName == "" ||
+			c.Request.URL.Path == "/api/collaboration/collaborations/sync" ||
+			strings.Contains(c.Request.URL.Path, "/estimated-values") ||
+			c.Request.URL.Path == "/api/aslan/environment/rendersets/default-values" {
 			c.Next()
 			return
 		}

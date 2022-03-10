@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ import (
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
+	"github.com/koderover/zadig/pkg/types"
 )
 
 const (
@@ -218,6 +220,12 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 		}
 	}
 
+	// Since we allow users to use custom environment variables, variable resolution is required.
+	if pipelineCtx.CacheEnable && pipelineCtx.Cache.MediumType == types.NFSMedium &&
+		pipelineCtx.CacheDirType == types.UserDefinedCacheDir {
+		pipelineCtx.CacheUserDir = p.renderEnv(pipelineCtx.CacheUserDir)
+	}
+
 	jobCtx := JobCtxBuilder{
 		JobName:     p.JobName,
 		PipelineCtx: pipelineCtx,
@@ -358,19 +366,17 @@ func (p *BuildTaskPlugin) Complete(ctx context.Context, pipelineTask *task.Task,
 		PipelineType: string(pipelineTask.Type),
 	}
 
-	// 清理用户取消和超时的任务
+	// Clean up tasks that user canceled or timed out.
 	defer func() {
-		if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
-			p.Log.Error(err)
-			p.Task.Error = err.Error()
-		}
+		go func() {
+			if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+				p.Log.Error(err)
+			}
 
-		if err := ensureDeleteConfigMap(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
-			p.Log.Error(err)
-			p.Task.Error = err.Error()
-		}
-
-		return
+			if err := ensureDeleteConfigMap(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+				p.Log.Error(err)
+			}
+		}()
 	}()
 
 	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.Task.ClusterID, p.FileName, jobLabel, p.kubeClient)
@@ -425,4 +431,22 @@ func (p *BuildTaskPlugin) IsTaskEnabled() bool {
 
 func (p *BuildTaskPlugin) ResetError() {
 	p.Task.Error = ""
+}
+
+// Note: Since there are few environment variables and few variables to be replaced,
+// this method is temporarily used.
+func (p *BuildTaskPlugin) renderEnv(data string) string {
+	mapper := func(data string) string {
+		for _, envar := range p.Task.JobCtx.EnvVars {
+			if data != envar.Key {
+				continue
+			}
+
+			return envar.Value
+		}
+
+		return fmt.Sprintf("$%s", data)
+	}
+
+	return os.Expand(data, mapper)
 }
