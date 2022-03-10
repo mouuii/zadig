@@ -20,19 +20,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/blang/semver/v4"
-	cm "github.com/chartmuseum/helm-push/pkg/chartmuseum"
 	"github.com/chartmuseum/helm-push/pkg/helm"
 	"github.com/hashicorp/go-multierror"
 	"github.com/otiai10/copy"
@@ -524,21 +520,16 @@ func getProductEnvInfo(productName, envName string) (*commonmodels.Product, erro
 	return productInfo, nil
 }
 
-func getChartRepoData(repoName string) (*commonmodels.HelmRepo, error) {
-	return commonrepo.NewHelmRepoColl().Find(&commonrepo.HelmRepoFindOption{RepoName: repoName})
+func createChartRepoClient(repoName string) (*helmtool.ChartRepoClient, error) {
+	chartRepo, err := getChartRepoData(repoName)
+	if err != nil {
+		return nil, err
+	}
+	return helmtool.NewHelmChartRepoClient(chartRepo.URL, chartRepo.Username, chartRepo.Password)
 }
 
-func createChartRepoClient(repo *commonmodels.HelmRepo) (*cm.Client, error) {
-	client, err := cm.NewClient(
-		cm.URL(repo.URL),
-		cm.Username(repo.Username),
-		cm.Password(repo.Password),
-		// need support more auth types
-	)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to create chart repo client, repoName: %s", repo.RepoName)
-	}
-	return client, nil
+func getChartRepoData(repoName string) (*commonmodels.HelmRepo, error) {
+	return commonrepo.NewHelmRepoColl().Find(&commonrepo.HelmRepoFindOption{RepoName: repoName})
 }
 
 // ensure chart files exist
@@ -741,47 +732,17 @@ func handleSingleChart(chartData *DeliveryChartData, product *commonmodels.Produ
 		return nil, err
 	}
 
-	client, err := createChartRepoClient(chartRepo)
+	client, err := createChartRepoClient(chartRepo.RepoName)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to create chart repo client, repoName: %s", chartRepo.RepoName)
 	}
 
 	log.Infof("pushing chart %s to %s...", filepath.Base(chartPackagePath), chartRepo.URL)
-	resp, err := client.UploadChartPackage(chartPackagePath, false)
+	err = client.PushChart(chartPackagePath, false)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to prepare pushing chart: %s", chartPackagePath)
 	}
-	err = handlePushResponse(resp)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to push chart: %s ", chartPackagePath)
-	}
 	return imageDetail, nil
-}
-
-func handlePushResponse(resp *http.Response) error {
-	if resp.StatusCode != 201 && resp.StatusCode != 202 {
-		b, err := ioutil.ReadAll(resp.Body)
-		defer func(Body io.ReadCloser) {
-			_ = Body.Close()
-		}(resp.Body)
-		if err != nil {
-			return err
-		}
-		return getChartmuseumError(b, resp.StatusCode)
-	}
-	log.Infof("push chart to chart repo done")
-	return nil
-}
-
-func getChartmuseumError(b []byte, code int) error {
-	var er struct {
-		Error string `json:"error"`
-	}
-	err := json.Unmarshal(b, &er)
-	if err != nil || er.Error == "" {
-		return errors.Errorf("%d: could not properly parse response JSON: %s", code, string(b))
-	}
-	return errors.Errorf("%d: %s", code, er.Error)
 }
 
 func makeChartTGZFileDir(productName, versionName string) (string, error) {
@@ -1021,16 +982,8 @@ func buildDeliveryCharts(chartDataMap map[string]*DeliveryChartData, deliveryVer
 }
 
 // send hook
-func sendVersionDeliveryHook(projectName, version, host, urlPath string) error {
-
-	deliveryVersion, err := commonrepo.NewDeliveryVersionColl().Get(&commonrepo.DeliveryVersionArgs{
-		ProductName: projectName,
-		Version:     version,
-	})
-	if err != nil {
-		return err
-	}
-
+func sendVersionDeliveryHook(deliveryVersion *commonmodels.DeliveryVersion, host, urlPath string) error {
+	projectName, version := deliveryVersion.ProductName, deliveryVersion.Version
 	ret := &DeliveryVersionHookPayload{
 		ProjectName: projectName,
 		Version:     version,
@@ -1077,11 +1030,13 @@ func sendVersionDeliveryHook(projectName, version, host, urlPath string) error {
 		return err
 	}
 
-	u, err := url.Parse(host)
+	targetPath := fmt.Sprintf("%s/%s", host, strings.TrimPrefix(urlPath, "/"))
+
+	// validate url
+	_, err = url.Parse(targetPath)
 	if err != nil {
 		return err
 	}
-	u.Path = path.Join(u.Path, urlPath)
 
 	reqBody, err := json.Marshal(ret)
 	if err != nil {
@@ -1089,7 +1044,7 @@ func sendVersionDeliveryHook(projectName, version, host, urlPath string) error {
 		return err
 	}
 
-	request, err := http.NewRequest("POST", u.String(), bytes.NewBuffer(reqBody))
+	request, err := http.NewRequest("POST", targetPath, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return err
 	}
@@ -1104,7 +1059,7 @@ func sendVersionDeliveryHook(projectName, version, host, urlPath string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("hook request send code error: %d", resp.StatusCode)
+		return fmt.Errorf("hook request send to url: %s got error resp code : %d", targetPath, resp.StatusCode)
 	}
 
 	return nil
@@ -1113,13 +1068,26 @@ func sendVersionDeliveryHook(projectName, version, host, urlPath string) error {
 func updateVersionStatus(versionName, projectName, status, errStr string) {
 	// send hook info when version build finished
 	if status == setting.DeliveryVersionStatusSuccess {
+
+		versionInfo, err := commonrepo.NewDeliveryVersionColl().Get(&commonrepo.DeliveryVersionArgs{
+			ProductName: projectName,
+			Version:     versionName,
+		})
+		if err != nil {
+			log.Errorf("failed to find version: %s of project %s, err: %s", versionName, projectName, err)
+			return
+		}
+		if versionInfo.Status == status {
+			return
+		}
+
 		templateProduct, err := templaterepo.NewProductColl().Find(projectName)
 		if err != nil {
 			log.Errorf("updateVersionStatus failed to find template product: %s, err: %s", projectName, err)
 		} else {
 			hookConfig := templateProduct.DeliveryVersionHook
 			if hookConfig != nil && hookConfig.Enable {
-				err = sendVersionDeliveryHook(projectName, versionName, hookConfig.HookHost, hookConfig.Path)
+				err = sendVersionDeliveryHook(versionInfo, hookConfig.HookHost, hookConfig.Path)
 				if err != nil {
 					log.Errorf("updateVersionStatus failed to send version delivery hook, projectName: %s, err: %s", projectName, err)
 				}
@@ -1261,14 +1229,6 @@ func CreateNewHelmDeliveryVersion(args *CreateHelmDeliveryVersionArgs, logger *z
 	if len(args.ChartDatas) == 0 {
 		return e.ErrCreateDeliveryVersion.AddDesc("no chart info appointed")
 	}
-
-	// prepare data
-	productInfo, err := getProductEnvInfo(args.ProductName, args.EnvName)
-	if err != nil {
-		log.Infof("failed to query product info, productName: %s envName %s, err: %s", args.ProductName, args.EnvName, err)
-		return e.ErrCreateDeliveryVersion.AddDesc(fmt.Sprintf("failed to query product info, procutName: %s envName %s", args.ProductName, args.EnvName))
-	}
-
 	// validate necessary params
 	if len(args.ChartRepoName) == 0 {
 		return e.ErrCreateDeliveryVersion.AddDesc("chart repo not appointed")
@@ -1276,7 +1236,12 @@ func CreateNewHelmDeliveryVersion(args *CreateHelmDeliveryVersionArgs, logger *z
 	if len(args.ImageRegistryID) == 0 {
 		return e.ErrCreateDeliveryVersion.AddDesc("image registry not appointed")
 	}
-
+	// prepare data
+	productInfo, err := getProductEnvInfo(args.ProductName, args.EnvName)
+	if err != nil {
+		log.Infof("failed to query product info, productName: %s envName %s, err: %s", args.ProductName, args.EnvName, err)
+		return e.ErrCreateDeliveryVersion.AddDesc(fmt.Sprintf("failed to query product info, procutName: %s envName %s", args.ProductName, args.EnvName))
+	}
 	chartDataMap, err := prepareChartData(args.ChartDatas, productInfo)
 	if err != nil {
 		return e.ErrCreateDeliveryVersion.AddErr(err)
@@ -1423,50 +1388,12 @@ func downloadChart(deliveryVersion *commonmodels.DeliveryVersion, chartInfo *com
 		return chartTGZFilePath, nil
 	}
 
-	chartRepo, err := getChartRepoData(chartInfo.ChartRepoName)
-	if err != nil {
-		return "", fmt.Errorf("failed to query chart-repo info, repoName %s", chartInfo.ChartRepoName)
-	}
-
-	client, err := createChartRepoClient(chartRepo)
+	client, err := createChartRepoClient(chartInfo.ChartRepoName)
 	if err != nil {
 		return "", err
 	}
 
-	if err = os.MkdirAll(chartTGZFileParent, 0644); err != nil {
-		return "", errors.Wrapf(err, "failed to craete tgz parent dir")
-	}
-
-	out, err := os.Create(chartTGZFilePath)
-	if err != nil {
-		_ = os.RemoveAll(chartTGZFilePath)
-		return "", errors.Wrapf(err, "failed to create chart tgz file")
-	}
-
-	response, err := client.DownloadFile(fmt.Sprintf("charts/%s", chartTGZName))
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to download file")
-	}
-
-	if response.StatusCode != 200 {
-		return "", errors.Wrapf(err, "download file failed %s", chartTGZName)
-	}
-	defer func() { _ = response.Body.Close() }()
-
-	b, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to read response data")
-	}
-
-	defer func(out *os.File) {
-		_ = out.Close()
-	}(out)
-
-	err = ioutil.WriteFile(chartTGZFilePath, b, 0644)
-	if err != nil {
-		return "", err
-	}
-	return chartTGZFilePath, nil
+	return chartTGZFilePath, client.DownloadChart(chartTGZFileParent, chartInfo.ChartName, chartInfo.ChartVersion)
 }
 
 func getChartDistributeInfo(releaseID, chartName string, log *zap.SugaredLogger) (*commonmodels.DeliveryDistribute, error) {
@@ -1522,39 +1449,11 @@ func preDownloadChart(projectName, versionName, chartName string, log *zap.Sugar
 }
 
 func getIndexInfoFromChartRepo(chartRepoName string) (*helm.Index, error) {
-	chartRepo, err := getChartRepoData(chartRepoName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query chart-repo info, repoName %s", chartRepoName)
-	}
-
-	client, err := createChartRepoClient(chartRepo)
+	client, err := createChartRepoClient(chartRepoName)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to create chart repo client")
 	}
-
-	resp, err := client.DownloadFile("index.yaml")
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to download index.yaml")
-	}
-
-	defer func(Body io.ReadCloser) {
-		_ = Body.Close()
-	}(resp.Body)
-
-	b, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != 200 {
-		return nil, errors.Wrapf(getChartmuseumError(b, resp.StatusCode), "failed to download index.yaml")
-	}
-
-	index, err := helm.LoadIndex(b)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to parse index.yaml")
-	}
-	return index, nil
+	return client.FetchIndexYaml()
 }
 
 func fillChartUrl(charts []*DeliveryVersionPayloadChart, chartRepoName string) error {
@@ -1568,7 +1467,6 @@ func fillChartUrl(charts []*DeliveryVersionPayloadChart, chartRepoName string) e
 	}
 
 	for name, entries := range index.Entries {
-
 		chart, ok := chartMap[name]
 		if !ok {
 			continue
@@ -1644,7 +1542,6 @@ func GetChartVersion(chartName, chartRepoName string) ([]*ChartVersionResp, erro
 }
 
 func preDownloadAndUncompressChart(projectName, versionName, chartName string, log *zap.SugaredLogger) (string, error) {
-
 	deliveryInfo, err := GetDeliveryVersion(&commonrepo.DeliveryVersionArgs{
 		ProductName: projectName,
 		Version:     versionName,
@@ -1680,7 +1577,6 @@ func preDownloadAndUncompressChart(projectName, versionName, chartName string, l
 }
 
 func PreviewDeliveryChart(projectName, version, chartName string, log *zap.SugaredLogger) (*DeliveryChartResp, error) {
-
 	dstDir, err := preDownloadAndUncompressChart(projectName, version, chartName, log)
 	if err != nil {
 		return nil, err

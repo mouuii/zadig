@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	zadigconfig "github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/config"
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
 	"github.com/koderover/zadig/pkg/setting"
@@ -113,9 +114,12 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 
 	// TODO: Since the namespace field has been used continuously since v1.10.0, the processing logic related to namespace needs to
 	// be deleted in v1.11.0.
-	p.KubeNamespace = pipelineTask.ConfigPayload.Build.KubeNamespace
-	if p.Task.Namespace != "" {
-		p.KubeNamespace = p.Task.Namespace
+	switch p.Task.ClusterID {
+	case setting.LocalClusterID:
+		p.KubeNamespace = zadigconfig.Namespace()
+	default:
+		p.KubeNamespace = setting.AttachedClusterNamespace
+
 		kubeClient, err := kubeclient.GetKubeClient(pipelineTask.ConfigPayload.HubServerAddr, p.Task.ClusterID)
 		if err != nil {
 			msg := fmt.Sprintf("failed to get kube client: %s", err)
@@ -129,22 +133,26 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 	}
 
 	// not local cluster
-	replaceDindServer := "." + DindServer
+	var (
+		replaceDindServer = "." + DindServer
+		dockerHost        = ""
+	)
+
 	if p.Task.ClusterID != "" && p.Task.ClusterID != setting.LocalClusterID {
 		if strings.Contains(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace) {
 			// replace namespace only
-			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace, KoderoverAgentNamespace, 1)
+			dockerHost = strings.Replace(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace, KoderoverAgentNamespace, 1)
 		} else {
 			// add namespace
-			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, replaceDindServer, replaceDindServer+"."+KoderoverAgentNamespace, 1)
+			dockerHost = strings.Replace(pipelineTask.DockerHost, replaceDindServer, replaceDindServer+"."+KoderoverAgentNamespace, 1)
 		}
 	} else if p.Task.ClusterID == "" || p.Task.ClusterID == setting.LocalClusterID {
 		if !strings.Contains(pipelineTask.DockerHost, pipelineTask.ConfigPayload.Build.KubeNamespace) {
 			// add namespace
-			pipelineTask.DockerHost = strings.Replace(pipelineTask.DockerHost, replaceDindServer, replaceDindServer+"."+pipelineTask.ConfigPayload.Build.KubeNamespace, 1)
+			dockerHost = strings.Replace(pipelineTask.DockerHost, replaceDindServer, replaceDindServer+"."+pipelineTask.ConfigPayload.Build.KubeNamespace, 1)
 		}
 	}
-	pipelineCtx.DockerHost = pipelineTask.DockerHost
+	pipelineCtx.DockerHost = dockerHost
 
 	if pipelineTask.Type == config.WorkflowType {
 		envName := pipelineTask.WorkflowArgs.Namespace
@@ -308,6 +316,8 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 		return
 	}
 	p.Log.Infof("succeed to create build job %s", p.JobName)
+
+	p.Task.TaskStatus = waitJobReady(ctx, p.KubeNamespace, p.JobName, p.kubeClient, p.Log)
 }
 
 func (p *BuildTaskPlugin) Wait(ctx context.Context) {

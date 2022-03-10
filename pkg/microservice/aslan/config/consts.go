@@ -106,6 +106,7 @@ const (
 	QueueItemPending Status = "pending"
 	StatusChanged    Status = "changed"
 	StatusNotRun     Status = "notRun"
+	StatusPrepare    Status = "prepare"
 )
 
 type TaskStatus string
@@ -139,6 +140,7 @@ const (
 	TaskResetImage      TaskType = "reset_image"
 	TaskDistribute      TaskType = "distribute"
 	TaskTrigger         TaskType = "trigger"
+	TaskExtension       TaskType = "extension"
 	TaskArtifactPackage TaskType = "artifact_package"
 )
 

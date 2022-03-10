@@ -242,7 +242,10 @@ func CreatePipelineTask(args *commonmodels.TaskArgs, log *zap.SugaredLogger) (*C
 		pt.ConfigPayload.RepoConfigs[repo.ID.Hex()] = repo
 	}
 
-	if err := ensurePipelineTask(pt, pt.TaskArgs.Deploy.Namespace, log); err != nil {
+	if err := ensurePipelineTask(&task.TaskOpt{
+		Task:    pt,
+		EnvName: pt.TaskArgs.Deploy.Namespace,
+	}, log); err != nil {
 		log.Errorf("Service.ensurePipelineTask failed %v %v", args, err)
 		if err, ok := err.(*ContainerNotFound); ok {
 			return nil, e.NewWithExtras(
@@ -664,6 +667,13 @@ func TestArgsToTestSubtask(args *commonmodels.TestTaskArgs, pt *task.Task, log *
 
 			testArg.TestModuleName = args.TestName
 
+			// In some old testing configurations, the `pre_test.cluster_id` field is empty indicating that's a local cluster.
+			// We do a protection here to avoid query failure.
+			// Resaving the testing configuration after v1.8.0 will automatically populate this field.
+			if testing.PreTest.ClusterID == "" {
+				testing.PreTest.ClusterID = setting.LocalClusterID
+			}
+
 			clusterInfo, err := commonrepo.NewK8SClusterColl().Get(testing.PreTest.ClusterID)
 			if err != nil {
 				return resp, e.ErrListTestModule.AddDesc(err.Error())
@@ -696,6 +706,7 @@ func TestArgsToTestSubtask(args *commonmodels.TestTaskArgs, pt *task.Task, log *
 	testTask.JobCtx.BuildSteps = append(testTask.JobCtx.BuildSteps, &task.BuildStep{BuildType: "shell", Scripts: testModule.Scripts})
 
 	testTask.JobCtx.TestResultPath = testModule.TestResultPath
+	testTask.JobCtx.TestReportPath = testModule.TestReportPath
 	testTask.JobCtx.TestThreshold = testModule.Threshold
 	testTask.JobCtx.Caches = testModule.Caches
 	testTask.JobCtx.ArtifactPaths = testModule.ArtifactPaths

@@ -42,6 +42,14 @@ const (
 	multiInfo  = "multi"
 )
 
+type BranchTagType string
+
+const (
+	BranchTagTypeBranch      BranchTagType = "Branch"
+	BranchTagTypeTag         BranchTagType = "Tag"
+	CommitMsgInterceptLength               = 60
+)
+
 type Service struct {
 	proxyColl        *mongodb.ProxyColl
 	workflowColl     *mongodb.WorkflowColl
@@ -295,10 +303,14 @@ func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotific
 				if err != nil {
 					return "", "", nil, err
 				}
-				branch, commitID, commitMsg, gitCommitURL := "", "", "", ""
+				branchTag, branchTagType, commitID, commitMsg, gitCommitURL := "", BranchTagTypeBranch, "", "", ""
 				for idx, buildRepo := range buildSt.JobCtx.Builds {
 					if idx == 0 || buildRepo.IsPrimary {
-						branch = buildRepo.Branch
+						branchTag = buildRepo.Branch
+						if buildRepo.Tag != "" {
+							branchTagType = BranchTagTypeTag
+							branchTag = buildRepo.Tag
+						}
 						if len(buildRepo.CommitID) > 8 {
 							commitID = buildRepo.CommitID[0:8]
 						}
@@ -306,8 +318,8 @@ func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotific
 						if len(commitMsgs) > 0 {
 							commitMsg = commitMsgs[0]
 						}
-						if len(commitMsg) > 40 {
-							commitMsg = commitMsg[0:40]
+						if len(commitMsg) > CommitMsgInterceptLength {
+							commitMsg = commitMsg[0:CommitMsgInterceptLength]
 						}
 						gitCommitURL = fmt.Sprintf("%s/%s/%s/commit/%s", buildRepo.Address, buildRepo.RepoOwner, buildRepo.RepoName, commitID)
 					}
@@ -317,7 +329,7 @@ func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotific
 				}
 				buildElemTemp += fmt.Sprintf("{{if eq .WebHookType \"dingding\"}}##### {{end}}**服务名称**：%s \n", buildSt.ServiceName)
 				buildElemTemp += fmt.Sprintf("{{if eq .WebHookType \"dingding\"}}##### {{end}}**镜像信息**：%s \n", buildSt.JobCtx.Image)
-				buildElemTemp += fmt.Sprintf("{{if eq .WebHookType \"dingding\"}}##### {{end}}**代码信息**：[Branch-%s %s](%s) \n", branch, commitID, gitCommitURL)
+				buildElemTemp += fmt.Sprintf("{{if eq .WebHookType \"dingding\"}}##### {{end}}**代码信息**：[%s-%s %s](%s) \n", branchTagType, branchTag, commitID, gitCommitURL)
 				buildElemTemp += fmt.Sprintf("{{if eq .WebHookType \"dingding\"}}##### {{end}}**提交信息**：%s \n", commitMsg)
 				build = append(build, buildElemTemp)
 			}
@@ -325,37 +337,7 @@ func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotific
 		case config.TaskTestingV2:
 			test = "{{if eq .WebHookType \"dingding\"}}##### {{end}}**测试结果** \n"
 			for _, sb := range subStage.SubTasks {
-				testSt, err := base.ToTestingTask(sb)
-				if err != nil {
-					return "", "", nil, err
-				}
-				if testSt.TaskStatus == "" {
-					testSt.TaskStatus = config.StatusNotRun
-				}
-				test += fmt.Sprintf("{{if ne .WebHookType \"feishu\"}} - {{end}}%s: ", testSt.TestModuleName)
-				if weChatNotification.Task.TestReports == nil {
-					test += fmt.Sprintf("%s \n", testSt.TaskStatus)
-					continue
-				}
-
-				for testname, report := range weChatNotification.Task.TestReports {
-					if testname != testSt.TestModuleName {
-						continue
-					}
-					tr := &task.TestReport{}
-					if task.IToi(report, tr) != nil {
-						log.Errorf("parse TestReport failed, err:%s", err)
-						continue
-					}
-					if tr.FunctionTestSuite == nil {
-						test += fmt.Sprintf("%s \n", testSt.TaskStatus)
-						continue
-					}
-					totalNum := tr.FunctionTestSuite.Tests + tr.FunctionTestSuite.Skips
-					failedNum := tr.FunctionTestSuite.Failures + tr.FunctionTestSuite.Errors
-					successNum := tr.FunctionTestSuite.Tests - failedNum
-					test += fmt.Sprintf("%d(成功)%d(失败)%d(总数) \n", successNum, failedNum, totalNum)
-				}
+				test = genTestCaseText(test, sb, weChatNotification.Task.TestReports)
 			}
 		}
 	}
@@ -413,39 +395,8 @@ func (w *Service) createNotifyBodyOfTestIM(desc string, weChatNotification *wech
 		if stage.TaskType != config.TaskTestingV2 {
 			continue
 		}
-
-		for testName, subTask := range stage.SubTasks {
-			testInfo, err := base.ToTestingTask(subTask)
-			if err != nil {
-				log.Errorf("parse testInfo failed, err:%s", err)
-				continue
-			}
-			if testInfo.JobCtx.TestType == setting.FunctionTest && testInfo.JobCtx.TestResultPath != "" {
-				url := fmt.Sprintf("{{.BaseURI}}/api/aslan/testing/report?pipelineName={{.Task.PipelineName}}&pipelineType={{.Task.Type}}&taskID={{.Task.TaskID}}&testName=%s", testInfo.TestName)
-				tplTestCaseInfo += fmt.Sprintf("{{if ne .WebHookType \"feishu\"}} - {{end}}[%s](%s): ", testName, url)
-				if weChatNotification.Task.TestReports == nil {
-					tplTestCaseInfo += fmt.Sprintf("%s \n ", testInfo.TaskStatus)
-					continue
-				}
-				for testname, report := range weChatNotification.Task.TestReports {
-					if testname != testInfo.TestModuleName {
-						continue
-					}
-					tr := &task.TestReport{}
-					if task.IToi(report, tr) != nil {
-						log.Errorf("parse TestReport failed, err:%s", err)
-						continue
-					}
-					if tr.FunctionTestSuite == nil {
-						tplTestCaseInfo += fmt.Sprintf("%s \n ", testInfo.TaskStatus)
-						continue
-					}
-					totalNum := tr.FunctionTestSuite.Tests + tr.FunctionTestSuite.Skips
-					failedNum := tr.FunctionTestSuite.Failures + tr.FunctionTestSuite.Errors
-					successNum := tr.FunctionTestSuite.Tests - failedNum
-					tplTestCaseInfo += fmt.Sprintf("%d(成功)%d(失败)%d(总数) \n", successNum, failedNum, totalNum)
-				}
-			}
+		for _, subTask := range stage.SubTasks {
+			tplTestCaseInfo = genTestCaseText(tplTestCaseInfo, subTask, weChatNotification.Task.TestReports)
 		}
 	}
 
@@ -565,4 +516,54 @@ func getTplExec(tplcontent string, weChatNotification *wechatNotification) (stri
 
 	}
 	return buffer.String(), nil
+}
+
+func checkTestReportsExist(testModuleName string, testReports map[string]interface{}) bool {
+	for testname := range testReports {
+		if testname == testModuleName {
+			return true
+		}
+	}
+	return false
+}
+
+func genTestCaseText(test string, subTask, testReports map[string]interface{}) string {
+	testSt, err := base.ToTestingTask(subTask)
+	if err != nil {
+		log.Errorf("parse testInfo failed, err:%s", err)
+		return test
+	}
+	if testSt.TaskStatus == "" {
+		testSt.TaskStatus = config.StatusNotRun
+	}
+	if testSt.JobCtx.TestType == setting.FunctionTest && testSt.JobCtx.TestReportPath != "" && testSt.TaskStatus == config.StatusPassed {
+		url := fmt.Sprintf("{{.BaseURI}}/api/aslan/testing/report?pipelineName={{.Task.PipelineName}}&pipelineType={{.Task.Type}}&taskID={{.Task.TaskID}}&testName=%s", testSt.TestModuleName)
+		test += fmt.Sprintf("{{if ne .WebHookType \"feishu\"}} - {{end}}[%s](%s): ", testSt.TestModuleName, url)
+	} else {
+		test += fmt.Sprintf("{{if ne .WebHookType \"feishu\"}} - {{end}}%s: ", testSt.TestModuleName)
+	}
+	if testReports == nil || !checkTestReportsExist(testSt.TestModuleName, testReports) {
+		test += fmt.Sprintf("%s \n", testSt.TaskStatus)
+		return test
+	}
+
+	for testname, report := range testReports {
+		if testname != testSt.TestModuleName {
+			continue
+		}
+		tr := &task.TestReport{}
+		if task.IToi(report, tr) != nil {
+			log.Errorf("parse TestReport failed, err:%s", err)
+			continue
+		}
+		if tr.FunctionTestSuite == nil {
+			test += fmt.Sprintf("%s \n", testSt.TaskStatus)
+			continue
+		}
+		totalNum := tr.FunctionTestSuite.Tests + tr.FunctionTestSuite.Skips
+		failedNum := tr.FunctionTestSuite.Failures + tr.FunctionTestSuite.Errors
+		successNum := tr.FunctionTestSuite.Tests - failedNum
+		test += fmt.Sprintf("%d(成功)%d(失败)%d(总数) \n", successNum, failedNum, totalNum)
+	}
+	return test
 }

@@ -300,8 +300,7 @@ func updateServiceTemplateByPushEvent(event *EventPush, log *zap.SugaredLogger) 
 	errs := &multierror.Error{}
 
 	for _, service := range serviceTmpls {
-		srcPath := service.SrcPath
-		_, _, _, _, path, _, err := GetOwnerRepoBranchPath(srcPath)
+		path, err := getServiceSrcPath(service)
 		if err != nil {
 			errs = multierror.Append(errs, err)
 		}
@@ -332,7 +331,6 @@ func updateServiceTemplateByPushEvent(event *EventPush, log *zap.SugaredLogger) 
 
 func GetGitlabServiceTemplates() ([]*commonmodels.Service, error) {
 	opt := &commonrepo.ServiceListOption{
-		Type:   setting.K8SDeployType,
 		Source: setting.SourceFromGitlab,
 	}
 	return commonrepo.NewServiceColl().ListMaxRevisions(opt)
@@ -367,11 +365,6 @@ func SyncServiceTemplateFromGitlab(service *commonmodels.Service, log *zap.Sugar
 	if err := fillServiceTmpl(setting.WebhookTaskCreator, service, log); err != nil {
 		log.Errorf("ensureServiceTmpl error: %+v", err)
 		return e.ErrValidateTemplate.AddDesc(err.Error())
-	}
-	// 更新到数据库，revision+1
-	if err := commonrepo.NewServiceColl().Create(service); err != nil {
-		log.Errorf("Failed to sync service %s from gitlab path %s error: %v", service.ServiceName, service.SrcPath, err)
-		return e.ErrCreateTemplate.AddDesc(err.Error())
 	}
 	log.Infof("End of sync service template %s from gitlab path %s", service.ServiceName, service.SrcPath)
 	return nil

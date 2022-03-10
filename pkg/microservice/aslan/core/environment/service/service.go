@@ -25,6 +25,7 @@ import (
 	"helm.sh/helm/v3/pkg/releaseutil"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/informers"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
@@ -38,6 +39,7 @@ import (
 	"github.com/koderover/zadig/pkg/shared/kube/wrapper"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/pkg/tool/kube/informer"
 	"github.com/koderover/zadig/pkg/tool/kube/serializer"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	"github.com/koderover/zadig/pkg/tool/log"
@@ -353,6 +355,15 @@ func RestartService(envName string, args *SvcOptArgs, log *zap.SugaredLogger) (e
 		return err
 	}
 
+	cls, err := kubeclient.GetKubeClientSet(config.HubServerAddress(), productObj.ClusterID)
+	if err != nil {
+		return e.ErrCreateEnv.AddErr(err)
+	}
+	inf, err := informer.NewInformer(productObj.ClusterID, productObj.Namespace, cls)
+	if err != nil {
+		return e.ErrCreateEnv.AddErr(err)
+	}
+
 	// aws secrets needs to be refreshed
 	regs, err := commonservice.ListRegistryNamespaces(true, log)
 	if err != nil {
@@ -431,7 +442,7 @@ func RestartService(envName string, args *SvcOptArgs, log *zap.SugaredLogger) (e
 					productObj,
 					productService,
 					productService,
-					newRender, kubeClient, log)
+					newRender, inf, kubeClient, log)
 
 				// 如果创建依赖服务组有返回错误, 停止等待
 				if err != nil {
@@ -444,7 +455,7 @@ func RestartService(envName string, args *SvcOptArgs, log *zap.SugaredLogger) (e
 	return nil
 }
 
-func queryPodsStatus(namespace, productName, serviceName string, kubeClient client.Client, log *zap.SugaredLogger) (string, string, []string) {
+func queryPodsStatus(namespace, productName, serviceName string, informer informers.SharedInformerFactory, log *zap.SugaredLogger) (string, string, []string) {
 	ls := labels.Set{}
 	if productName != "" {
 		ls[setting.ProductLabel] = productName
@@ -452,7 +463,7 @@ func queryPodsStatus(namespace, productName, serviceName string, kubeClient clie
 	if serviceName != "" {
 		ls[setting.ServiceLabel] = serviceName
 	}
-	return kube.GetSelectedPodsInfo(namespace, ls.AsSelector(), kubeClient, log)
+	return kube.GetSelectedPodsInfo(ls.AsSelector(), informer, log)
 }
 
 // validateServiceContainer validate container with envName like dev

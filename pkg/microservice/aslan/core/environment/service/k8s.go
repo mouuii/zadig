@@ -26,6 +26,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/informers"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
@@ -36,6 +37,7 @@ import (
 	"github.com/koderover/zadig/pkg/setting"
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	e "github.com/koderover/zadig/pkg/tool/errors"
+	"github.com/koderover/zadig/pkg/tool/kube/informer"
 )
 
 type K8sService struct {
@@ -47,11 +49,11 @@ type K8sService struct {
 // If service doesnt have pods, service status = success (all objects created) or failed (fail to create some objects).
 // 正常：StatusRunning or StatusSucceed
 // 错误：StatusError or StatusFailed
-func (k *K8sService) queryServiceStatus(namespace, envName, productName string, serviceTmpl *commonmodels.Service, kubeClient client.Client) (string, string, []string) {
+func (k *K8sService) queryServiceStatus(namespace, envName, productName string, serviceTmpl *commonmodels.Service, informer informers.SharedInformerFactory) (string, string, []string) {
 	k.log.Infof("queryServiceStatus of service: %s of product: %s in namespace %s", serviceTmpl.ServiceName, productName, namespace)
 	if len(serviceTmpl.Containers) > 0 {
 		// 有容器时，根据pods status判断服务状态
-		return queryPodsStatus(namespace, productName, serviceTmpl.ServiceName, kubeClient, k.log)
+		return queryPodsStatus(namespace, productName, serviceTmpl.ServiceName, informer, k.log)
 	}
 
 	return setting.PodSucceeded, setting.PodReady, []string{}
@@ -88,6 +90,15 @@ func (k *K8sService) updateService(args *SvcOptArgs) error {
 		return e.ErrUpdateEnv.AddErr(err)
 	}
 
+	cls, err := kubeclient.GetKubeClientSet(config.HubServerAddress(), exitedProd.ClusterID)
+	if err != nil {
+		return e.ErrUpdateEnv.AddDesc(err.Error())
+	}
+	inf, err := informer.NewInformer(exitedProd.ClusterID, exitedProd.Namespace, cls)
+	if err != nil {
+		return e.ErrUpdateEnv.AddDesc(err.Error())
+	}
+
 	switch exitedProd.Status {
 	case setting.ProductStatusCreating, setting.ProductStatusUpdating, setting.ProductStatusDeleting:
 		k.log.Errorf("[%s][P:%s] Product is not in valid status", args.EnvName, args.ProductName)
@@ -111,7 +122,7 @@ func (k *K8sService) updateService(args *SvcOptArgs) error {
 		exitedProd,
 		svc,
 		exitedProd.GetServiceMap()[svc.ServiceName],
-		newRender, kubeClient, k.log)
+		newRender, inf, kubeClient, k.log)
 
 	// 如果创建依赖服务组有返回错误, 停止等待
 	if err != nil {
@@ -135,9 +146,7 @@ func (k *K8sService) updateService(args *SvcOptArgs) error {
 	return nil
 }
 
-// TODO: LOU: improve the status scope and definition, like pod status, service status, environment, cluster status, ...
-// TODO: LOU: rewrite it
-func (k *K8sService) listGroupServices(allServices []*commonmodels.ProductService, envName, productName string, kubeClient client.Client, productInfo *commonmodels.Product) []*commonservice.ServiceResp {
+func (k *K8sService) listGroupServices(allServices []*commonmodels.ProductService, envName, productName string, informer informers.SharedInformerFactory, productInfo *commonmodels.Product) []*commonservice.ServiceResp {
 	var wg sync.WaitGroup
 	var resp []*commonservice.ServiceResp
 	var mutex sync.RWMutex
@@ -164,8 +173,8 @@ func (k *K8sService) listGroupServices(allServices []*commonmodels.ProductServic
 
 			gp.ProductName = serviceTmpl.ProductName
 			// 查询group下所有pods信息
-			if kubeClient != nil {
-				gp.Status, gp.Ready, gp.Images = k.queryServiceStatus(productInfo.Namespace, envName, productName, serviceTmpl, kubeClient)
+			if informer != nil {
+				gp.Status, gp.Ready, gp.Images = k.queryServiceStatus(productInfo.Namespace, envName, productName, serviceTmpl, informer)
 				// 如果产品正在创建中，且service status为ERROR（POD还没创建出来），则判断为Pending，尚未开始创建
 				if productInfo.Status == setting.ProductStatusCreating && gp.Status == setting.PodError {
 					gp.Status = setting.PodPending
@@ -190,7 +199,7 @@ func (k *K8sService) listGroupServices(allServices []*commonmodels.ProductServic
 	return resp
 }
 
-func (k *K8sService) createGroup(envName, productName, username string, group []*commonmodels.ProductService, renderSet *commonmodels.RenderSet, kubeClient client.Client) error {
+func (k *K8sService) createGroup(envName, productName, username string, group []*commonmodels.ProductService, renderSet *commonmodels.RenderSet, informer informers.SharedInformerFactory, kubeClient client.Client) error {
 	k.log.Infof("[Namespace:%s][Product:%s] createGroup", envName, productName)
 	updatableServiceNameList := make([]string, 0)
 
@@ -223,7 +232,7 @@ func (k *K8sService) createGroup(envName, productName, username string, group []
 		updatableServiceNameList = append(updatableServiceNameList, group[i].ServiceName)
 		go func(svc *commonmodels.ProductService) {
 			defer wg.Done()
-			items, err := upsertService(false, prod, svc, nil, renderSet, kubeClient, k.log)
+			items, err := upsertService(false, prod, svc, nil, renderSet, informer, kubeClient, k.log)
 			if err != nil {
 				lock.Lock()
 				switch e := err.(type) {

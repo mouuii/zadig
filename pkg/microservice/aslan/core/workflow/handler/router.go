@@ -129,6 +129,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		workflowtask.GET("/id/:id/pipelines/:name", GetWorkflowTask)
 		workflowtask.POST("/id/:id/pipelines/:name/restart", gin2.UpdateOperationLogStatus, RestartWorkflowTask)
 		workflowtask.DELETE("/id/:id/pipelines/:name", gin2.UpdateOperationLogStatus, CancelWorkflowTaskV2)
+		workflowtask.GET("/callback/id/:id/name/:name", GetWorkflowTaskCallback)
 	}
 
 	serviceTask := router.Group("servicetask")
@@ -160,5 +161,10 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		taskV3.GET("/max/:max/start/:start/name/:name", ListWorkflowV3TasksResult)
 		taskV3.GET("/id/:id/name/:name", GetWorkflowTaskV3)
 		taskV3.GET("/callback/id/:id/name/:name", GetWorkflowTaskV3Callback)
+	}
+
+	bundles := router.Group("bundle-resources")
+	{
+		bundles.GET("", GetBundleResources)
 	}
 }

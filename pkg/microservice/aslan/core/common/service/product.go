@@ -31,11 +31,13 @@ import (
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/collaboration"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
 	"github.com/koderover/zadig/pkg/setting"
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	helmtool "github.com/koderover/zadig/pkg/tool/helmclient"
+	"github.com/koderover/zadig/pkg/tool/kube/informer"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 )
 
@@ -51,6 +53,16 @@ func DeleteProduct(username, envName, productName, requestID string, log *zap.Su
 		return e.ErrDeleteEnv.AddDesc("not found")
 	}
 
+	// delete informer's cache
+	informer.DeleteInformer(productInfo.ClusterID, productInfo.Namespace)
+
+	envCMMap, err := collaboration.GetEnvCMMap([]string{productName}, log)
+	if err != nil {
+		return err
+	}
+	if cmSets, ok := envCMMap[collaboration.BuildEnvCMMapKey(productName, envName)]; ok {
+		return fmt.Errorf("this is a base environment, collaborations:%v is related", cmSets.List())
+	}
 	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), productInfo.ClusterID)
 	if err != nil {
 		return e.ErrDeleteEnv.AddErr(err)
