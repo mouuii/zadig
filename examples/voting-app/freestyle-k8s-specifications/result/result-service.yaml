@@ -4,7 +4,6 @@ metadata:
   labels:
     app: result
     version: rc-origin
-    version: 1
   name: result
 spec:
   type: NodePort
@@ -23,7 +22,7 @@ metadata:
     nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
   rules:
-  - host: result-$Namespace$.test.8slan.com
+  - host: result-e2e-10x-$Namespace$.ko.coderover.cn
     http:
       paths:
       - path: /

@@ -10,8 +10,8 @@ image:
 
 resources:
   requests:
-    cpu: 11m
-    mem: 11Mi
+    cpu: 10m
+    mem: 10Mi
 
   limits:
     cpu: 20m
