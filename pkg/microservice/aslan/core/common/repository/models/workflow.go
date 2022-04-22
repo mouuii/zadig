@@ -274,12 +274,14 @@ type ExtensionStage struct {
 }
 
 type RepoImage struct {
-	RepoID    string `json:"repo_id" bson:"repo_id"`
-	Name      string `json:"name" bson:"name" yaml:"name"`
-	Username  string `json:"-" yaml:"username"`
-	Password  string `json:"-" yaml:"password"`
-	Host      string `json:"host" yaml:"host"`
-	Namespace string `json:"namespace" yaml:"namespace"`
+	RepoID        string `json:"repo_id" bson:"repo_id"`
+	Name          string `json:"name" bson:"name" yaml:"name"`
+	Username      string `json:"-" yaml:"username"`
+	Password      string `json:"-" yaml:"password"`
+	Host          string `json:"host" yaml:"host"`
+	Namespace     string `json:"namespace" yaml:"namespace"`
+	DeployEnabled bool   `json:"deploy_enabled" yaml:"deploy_enabled"`
+	DeployEnv     string `json:"deploy_env"   yaml:"deploy_env"`
 }
 
 type ProductDistribute struct {
@@ -339,22 +341,23 @@ type HookPayload struct {
 }
 
 type TargetArgs struct {
-	Name             string            `bson:"name"                      json:"name"`
-	ServiceName      string            `bson:"service_name"              json:"service_name"`
-	ServiceType      string            `bson:"service_type,omitempty"    json:"service_type,omitempty"`
-	ProductName      string            `bson:"product_name"              json:"product_name"`
-	Build            *BuildArgs        `bson:"build"                     json:"build"`
-	Deploy           []DeployEnv       `bson:"deloy"                     json:"deploy"`
-	Image            string            `bson:"image"                     json:"image"`
-	BinFile          string            `bson:"bin_file"                  json:"bin_file"`
-	Envs             []*KeyVal         `bson:"envs"                      json:"envs"`
-	HasBuild         bool              `bson:"has_build"                 json:"has_build"`
-	JenkinsBuildArgs *JenkinsBuildArgs `bson:"jenkins_build_args"        json:"jenkins_build_args"`
+	Name             string            `bson:"name"                          json:"name"`
+	ImageName        string            `bson:"image_name"                    json:"image_name"`
+	ServiceName      string            `bson:"service_name"                  json:"service_name"`
+	ServiceType      string            `bson:"service_type,omitempty"        json:"service_type,omitempty"`
+	ProductName      string            `bson:"product_name"                  json:"product_name"`
+	Build            *BuildArgs        `bson:"build"                         json:"build"`
+	Deploy           []DeployEnv       `bson:"deploy"                        json:"deploy"`
+	Image            string            `bson:"image,omitempty"               json:"image,omitempty"`
+	BinFile          string            `bson:"bin_file"                      json:"bin_file"`
+	Envs             []*KeyVal         `bson:"envs"                          json:"envs"`
+	HasBuild         bool              `bson:"has_build"                     json:"has_build"`
+	JenkinsBuildArgs *JenkinsBuildArgs `bson:"jenkins_build_args,omitempty"  json:"jenkins_build_args,omitempty"`
 }
 
 type JenkinsBuildArgs struct {
-	JobName            string               `bson:"job_name"            json:"job_name"`
-	JenkinsBuildParams []*JenkinsBuildParam `bson:"jenkins_build_param" json:"jenkins_build_params"`
+	JobName            string                     `bson:"job_name"            json:"job_name"`
+	JenkinsBuildParams []*types.JenkinsBuildParam `bson:"jenkins_build_param" json:"jenkins_build_params"`
 }
 
 type BuildArgs struct {
@@ -369,6 +372,7 @@ type DeployEnv struct {
 
 type ArtifactArgs struct {
 	Name         string      `bson:"name"                                json:"name"`
+	ImageName    string      `bson:"image_name,omitempty"                json:"image_name,omitempty"`
 	ServiceName  string      `bson:"service_name"                        json:"service_name"`
 	Image        string      `bson:"image,omitempty"                     json:"image,omitempty"`
 	Deploy       []DeployEnv `bson:"deploy"                              json:"deploy"`

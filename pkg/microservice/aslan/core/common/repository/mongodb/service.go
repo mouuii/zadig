@@ -61,6 +61,16 @@ type ServiceListOption struct {
 	NotInServices  []*templatemodels.ServiceInfo
 }
 
+type ServiceRevision struct {
+	ServiceName string
+	Revision    int64
+}
+
+type SvcRevisionListOption struct {
+	ProductName      string
+	ServiceRevisions []*ServiceRevision
+}
+
 type ServiceAggregateResult struct {
 	ServiceID primitive.ObjectID `bson:"service_id"`
 }
@@ -171,6 +181,13 @@ func (c *ServiceColl) ListMaxRevisionsByProduct(productName string) ([]*models.S
 		"status":       bson.M{"$ne": setting.ProductStatusDeleting},
 	}
 
+	return c.listMaxRevisions(m, nil)
+}
+
+func (c *ServiceColl) ListMaxRevisionsAllSvcByProduct(productName string) ([]*models.Service, error) {
+	m := bson.M{
+		"product_name": productName,
+	}
 	return c.listMaxRevisions(m, nil)
 }
 
@@ -435,6 +452,40 @@ func (c *ServiceColl) ListAllRevisions() ([]*models.Service, error) {
 	}
 
 	return resp, err
+}
+
+func (c *ServiceColl) ListServicesWithSRevision(opt *SvcRevisionListOption) ([]*models.Service, error) {
+	productMatch := bson.M{}
+	productMatch["product_name"] = opt.ProductName
+
+	var serviceMatch bson.A
+	for _, sr := range opt.ServiceRevisions {
+		serviceMatch = append(serviceMatch, bson.M{
+			"service_name": sr.ServiceName,
+			"revision":     sr.Revision,
+		})
+	}
+
+	pipeline := []bson.M{
+		{
+			"$match": productMatch,
+		},
+		{
+			"$match": bson.M{
+				"$or": serviceMatch,
+			},
+		},
+	}
+	cursor, err := c.Aggregate(context.TODO(), pipeline)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]*models.Service, 0)
+	if err := cursor.All(context.TODO(), &res); err != nil {
+		return nil, err
+	}
+	return res, err
 }
 
 func (c *ServiceColl) ListMaxRevisionsByProject(serviceName, serviceType string) ([]*models.Service, error) {

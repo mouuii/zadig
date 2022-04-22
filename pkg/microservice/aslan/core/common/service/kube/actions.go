@@ -17,7 +17,9 @@ limitations under the License.
 package kube
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,20 +29,67 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/setting"
 	"github.com/koderover/zadig/pkg/tool/kube/getter"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	"github.com/koderover/zadig/pkg/tool/log"
+	zadigtypes "github.com/koderover/zadig/pkg/types"
 )
 
-func CreateNamespace(namespace string, kubeClient client.Client) error {
-	err := updater.CreateNamespaceByName(namespace, map[string]string{setting.EnvCreatedBy: setting.EnvCreator}, kubeClient)
+func CreateNamespace(namespace string, enableShare bool, kubeClient client.Client) error {
+	labels := map[string]string{
+		setting.EnvCreatedBy: setting.EnvCreator,
+	}
+	if enableShare {
+		labels[zadigtypes.IstioLabelKeyInjection] = zadigtypes.IstioLabelValueInjection
+	}
+
+	err := updater.CreateNamespaceByName(namespace, labels, kubeClient)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 
+	nsObj := &corev1.Namespace{}
+	// It may fail to obtain the namespace immediately after it is created due to synchronization delay.
+	// Try twice.
+	for i := 0; i < 2; i++ {
+		err = kubeClient.Get(context.TODO(), client.ObjectKey{
+			Name: namespace,
+		}, nsObj)
+		if err == nil {
+			break
+		}
+
+		time.Sleep(time.Second)
+	}
+	if err != nil {
+		return err
+	}
+
+	if nsObj.Status.Phase == corev1.NamespaceTerminating {
+		return fmt.Errorf("namespace `%s` is in terminating state, please wait for a whilie and try again.", namespace)
+	}
+
 	return nil
+}
+
+func CreateOrUpdateRSASecret(publicKey, privateKey []byte, kubeClient client.Client) error {
+	data := make(map[string][]byte)
+
+	data["publicKey"] = publicKey
+	data["privateKey"] = privateKey
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: config.Namespace(),
+			Name:      setting.RSASecretName,
+		},
+		Data: data,
+		Type: corev1.SecretTypeOpaque,
+	}
+	return updater.UpdateOrCreateSecret(secret, kubeClient)
 }
 
 func CreateOrUpdateRegistrySecret(namespace string, reg *commonmodels.RegistryNamespace, kubeClient client.Client) error {

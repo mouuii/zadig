@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The KodeRover Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package service
 
 import (
@@ -5,6 +21,7 @@ import (
 	"reflect"
 	"time"
 
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -287,7 +304,7 @@ func GetCollaborationUpdate(projectName, uid, identityType, userName string, log
 	}
 	collaborationInstances, err := mongodb.NewCollaborationInstanceColl().List(&mongodb.CollaborationInstanceFindOptions{
 		ProjectName: projectName,
-		UserUID:     uid,
+		UserUID:     []string{uid},
 	})
 	if err != nil {
 		logger.Errorf("GetCollaborationInstance error, err msg:%s", err)
@@ -342,7 +359,7 @@ func syncInstance(updateResp *GetCollaborationUpdateResp, projectName, identityT
 		findOpts = append(findOpts, mongodb.CollaborationInstanceFindOptions{
 			Name:        instance.CollaborationName,
 			ProjectName: instance.ProjectName,
-			UserUID:     instance.UserUID,
+			UserUID:     []string{instance.UserUID},
 		})
 	}
 	return mongodb.NewCollaborationInstanceColl().BulkDelete(mongodb.CollaborationInstanceListOptions{
@@ -832,6 +849,7 @@ func syncLabel(updateResp *GetCollaborationUpdateResp, projectName, identityType
 		}
 	}
 	if len(deleteBindings) > 0 {
+		logger.Infof("start syncLabel DeleteLabelBindings:%v user:%s", deleteBindings, userName)
 		err = service.DeleteLabelBindings(&service.DeleteLabelBindingsArgs{
 			LabelBindings: deleteBindings,
 		}, userName, logger)
@@ -860,14 +878,16 @@ func syncDeleteResource(updateResp *GetCollaborationUpdateResp, username, projec
 	log *zap.SugaredLogger) (err error) {
 	deleteResp := getCollaborationDelete(updateResp)
 	for _, product := range deleteResp.Products {
-		err := commonservice.DeleteProduct(username, product, projectName, requestID, log)
-		if err != nil {
+		err := service2.DeleteProduct(username, product, projectName, requestID, log)
+		if err != nil && err != mongo.ErrNoDocuments {
+			log.Errorf("delete product err:%v", err)
 			return err
 		}
 	}
 	for _, workflow := range deleteResp.Workflows {
 		err := commonservice.DeleteWorkflow(workflow, requestID, false, log)
-		if err != nil {
+		if err != nil && err != mongo.ErrNoDocuments {
+			log.Errorf("delete workflow err:%v", err)
 			return err
 		}
 	}
@@ -916,8 +936,8 @@ func syncNewResource(products *SyncCollaborationInstanceArgs, updateResp *GetCol
 					OldName:       product.BaseName,
 					NewName:       product.Name,
 					BaseName:      product.BaseName,
-					DefaultValues: product.DefaultValues,
-					ChartValues:   product.ChartValues,
+					DefaultValues: productArg.DefaultValues,
+					ChartValues:   productArg.ChartValues,
 				})
 			}
 			if productArg.DeployType == string(setting.K8SDeployType) {
@@ -1208,7 +1228,7 @@ func DeleteCIResources(userName, requestID string, cis []*models.CollaborationIn
 		findOpts = append(findOpts, mongodb.CollaborationInstanceFindOptions{
 			ProjectName: ci.ProjectName,
 			Name:        ci.CollaborationName,
-			UserUID:     ci.UserUID,
+			UserUID:     []string{ci.UserUID},
 		})
 		policyNames = append(policyNames, ci.PolicyName)
 	}
@@ -1272,7 +1292,7 @@ func DeleteCIResources(userName, requestID string, cis []*models.CollaborationIn
 		}
 		for _, product := range ci.Products {
 			if product.CollaborationType == config.CollaborationNew {
-				err = commonservice.DeleteProduct(userName, product.Name, ci.ProjectName, requestID, logger)
+				err = service2.DeleteProduct(userName, product.Name, ci.ProjectName, requestID, logger)
 				if err != nil {
 					return err
 				}

@@ -432,7 +432,7 @@ func UpdateWorkflowTaskArgs(triggerYaml *TriggerYaml, workflow *commonmodels.Wor
 		if test.Repo.Strategy == TestRepoStrategyCurrentRepo {
 			for _, repo := range moduleTest.Repos {
 				if repo.RepoName == item.MainRepo.RepoName && repo.RepoOwner == item.MainRepo.RepoOwner {
-					repo.Branch = item.MainRepo.Branch
+					repo.Branch = branref
 					repo.PR = prId
 				}
 			}
@@ -553,7 +553,6 @@ func TriggerWorkflowByGitlabEvent(event interface{}, baseURI, requestID string, 
 					branref = mergeEvent.ObjectAttributes.SourceBranch
 				}
 				prID = evt.ObjectAttributes.IID
-				item.MainRepo.Branch = getBranchFromRef(mergeEvent.ObjectAttributes.TargetBranch)
 			case *gitlab.TagEvent:
 				tagEvent = evt
 				if (item.MainRepo.RepoOwner + "/" + item.MainRepo.RepoName) != tagEvent.Project.PathWithNamespace {
@@ -746,7 +745,7 @@ func CreateEnvAndTaskByPR(workflowArgs *commonmodels.WorkflowTaskArgs, prID int,
 	}
 	//按照用户设置的环境回收策略进行环境回收
 	if workflowArgs.EnvRecyclePolicy == setting.EnvRecyclePolicyAlways || (workflowArgs.EnvRecyclePolicy == setting.EnvRecyclePolicyTaskStatus && taskStatus == string(config.StatusPassed)) {
-		err = commonservice.DeleteProduct(setting.SystemUser, envName, workflowArgs.ProductTmplName, requestID, log)
+		err = environmentservice.DeleteProduct(setting.SystemUser, envName, workflowArgs.ProductTmplName, requestID, log)
 		if err != nil {
 			log.Errorf("CreateEnvAndTaskByPR DeleteProduct err:%v ", err)
 			return err

@@ -146,6 +146,24 @@ func YamlValidator(c *gin.Context) {
 	ctx.Resp = resp
 }
 
+func HelmReleaseNaming(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	projectName := c.Query("projectName")
+	if projectName == "" {
+		ctx.Err = e.ErrInvalidParam.AddDesc("projectName can't be nil")
+		return
+	}
+
+	args := new(svcservice.ReleaseNamingRule)
+	if err := c.BindJSON(args); err != nil {
+		ctx.Err = e.ErrInvalidParam.AddDesc("invalid yaml args")
+		return
+	}
+	ctx.Err = svcservice.UpdateReleaseNamingRule(ctx.UserName, ctx.RequestID, projectName, args, ctx.Logger)
+}
+
 func DeleteServiceTemplate(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
@@ -164,14 +182,6 @@ func ListServicePort(c *gin.Context) {
 		return
 	}
 	ctx.Resp, ctx.Err = svcservice.ListServicePort(c.Param("name"), c.Param("type"), c.Query("projectName"), setting.ProductStatusDeleting, revision, ctx.Logger)
-}
-
-type K8sWorkloadsArgs struct {
-	WorkLoads   []commonmodels.Workload `bson:"workLoads"        json:"workLoads"`
-	EnvName     string                  `bson:"env_name"         json:"env_name"`
-	ClusterID   string                  `bson:"cluster_id"       json:"cluster_id"`
-	Namespace   string                  `bson:"namespace"        json:"namespace"`
-	ProductName string                  `bson:"product_name"     json:"product_name"`
 }
 
 func UpdateWorkloads(c *gin.Context) {
@@ -195,14 +205,14 @@ func UpdateWorkloads(c *gin.Context) {
 func CreateK8sWorkloads(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
-	args := new(K8sWorkloadsArgs)
+	args := new(svcservice.K8sWorkloadsArgs)
 	err := c.BindJSON(args)
 	if err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc("invalid K8sWorkloadsArgs args")
 		return
 	}
 
-	ctx.Err = svcservice.CreateK8sWorkLoads(c, ctx.RequestID, ctx.UserName, args.ProductName, args.WorkLoads, args.ClusterID, args.Namespace, args.EnvName, ctx.Logger)
+	ctx.Err = svcservice.CreateK8sWorkLoads(c, ctx.RequestID, ctx.UserName, args, ctx.Logger)
 }
 
 func ListAvailablePublicServices(c *gin.Context) {

@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/koderover/zadig/pkg/tool/s3"
 	"gopkg.in/yaml.v3"
 
 	"github.com/koderover/zadig/pkg/microservice/reaper/config"
@@ -429,6 +430,47 @@ func (r *Reaper) AfterExec() error {
 		}
 	}
 
+	if r.Ctx.UploadEnabled {
+		forcedPathStyle := true
+		if r.Ctx.UploadStorageInfo.Provider == setting.ProviderSourceAli {
+			forcedPathStyle = false
+		}
+		client, err := s3.NewClient(r.Ctx.UploadStorageInfo.Endpoint, r.Ctx.UploadStorageInfo.AK, r.Ctx.UploadStorageInfo.SK, r.Ctx.UploadStorageInfo.Insecure, forcedPathStyle)
+		if err != nil {
+			return fmt.Errorf("failed to create s3 client to upload file, err: %s", err)
+		}
+		for _, upload := range r.Ctx.UploadInfo {
+			info, err := os.Stat(upload.FilePath)
+			if err != nil {
+				return fmt.Errorf("failed to upload file path [%s] to destination [%s], the error is: %s", upload.FilePath, upload.DestinationPath, err)
+			}
+			// if the given path is a directory
+			if info.IsDir() {
+				// we get ALL files in this directory and upload it to the object storage
+				files, err := ioutil.ReadDir(upload.FilePath)
+				if err != nil {
+					return fmt.Errorf("failed to read file information in directory: [%s], the error is: %s", upload.FilePath, err)
+				}
+				for _, file := range files {
+					if !file.IsDir() {
+						key := filepath.Join(upload.DestinationPath, file.Name())
+						originalFilePath := filepath.Join(upload.FilePath, file.Name())
+						err := client.Upload(r.Ctx.UploadStorageInfo.Bucket, originalFilePath, key)
+						if err != nil {
+							fmt.Printf("Failed to upload [%s] to key [%s] on s3, the error is: %s", originalFilePath, key, err)
+						}
+					}
+				}
+			} else {
+				key := filepath.Join(upload.DestinationPath, info.Name())
+				err := client.Upload(r.Ctx.UploadStorageInfo.Bucket, upload.FilePath, key)
+				if err != nil {
+					fmt.Printf("Failed to upload [%s] to key [%s] on s3, the error is: %s", upload.FilePath, key, err)
+				}
+			}
+		}
+	}
+
 	if r.Ctx.ArtifactPath != "" {
 		if err := artifactsUpload(r.Ctx, r.ActiveWorkspace, []string{r.Ctx.ArtifactPath}, "buildv3"); err != nil {
 			return fmt.Errorf("failed to upload artifacts: %s", err)
@@ -501,6 +543,7 @@ func (r *Reaper) getUserEnvs() []string {
 		fmt.Sprintf("WORKSPACE=%s", r.ActiveWorkspace),
 		// TODO: readme文件可以使用别的方式代替
 		fmt.Sprintf("README=%s", ReadmeFile),
+		"DOCKER_BUILDKIT=1",
 	}
 
 	r.Ctx.Paths = strings.Replace(r.Ctx.Paths, "$HOME", config.Home(), -1)

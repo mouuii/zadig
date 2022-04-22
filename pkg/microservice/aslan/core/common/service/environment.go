@@ -133,6 +133,7 @@ func GetRenderCharts(productName, envName, serviceName string, log *zap.SugaredL
 		rcaObj := new(RenderChartArg)
 		rcaObj.LoadFromRenderChartModel(singleChart)
 		rcaObj.EnvName = envName
+		rcaObj.YamlData = singleChart.OverrideYaml
 		ret = append(ret, rcaObj)
 	}
 	return ret, nil
@@ -142,7 +143,7 @@ func GetRenderCharts(productName, envName, serviceName string, log *zap.SugaredL
 func fillServiceDisplayName(svcList []*ServiceResp, productInfo *models.Product) {
 	if productInfo.Source == setting.SourceFromHelm {
 		for _, svc := range svcList {
-			svc.ServiceDisplayName = util.ExtraServiceName(svc.ServiceName, productInfo.Namespace)
+			svc.ServiceDisplayName = svc.ServiceName
 		}
 	}
 }
@@ -201,6 +202,30 @@ func ListWorkloadsInEnv(envName, productName, filter string, perPage, page int, 
 			return res
 		},
 	}
+
+	// for helm service, only show deploys/stss created by zadig
+	if projectInfo.ProductFeature != nil && projectInfo.ProductFeature.DeployType == setting.HelmDeployType {
+		filterArray = append(filterArray, func(workloads []*Workload) []*Workload {
+			releaseNameMap, err := GetReleaseNameToServiceNameMap(productInfo)
+			if err != nil {
+				log.Errorf("failed to generate relase map for product: %s:%s", productInfo.ProductName, productInfo.EnvName)
+				return workloads
+			}
+
+			var res []*Workload
+			for _, workload := range workloads {
+				if len(workload.Annotation) == 0 {
+					continue
+				}
+				releaseName := workload.Annotation[setting.HelmReleaseNameAnnotation]
+				if _, ok := releaseNameMap[releaseName]; ok {
+					res = append(res, workload)
+				}
+			}
+			return res
+		})
+	}
+
 	if filter != "" {
 		filterArray = append(filterArray, func(workloads []*Workload) []*Workload {
 			data, err := jsonutil.ToJSON(filter)
@@ -253,6 +278,7 @@ type Workload struct {
 	Images      []string               `json:"-"`
 	Ready       bool                   `json:"ready"`
 	ServiceName string                 `json:"service_name"`
+	Annotation  map[string]string      `json:"-"`
 }
 
 func ListWorkloads(envName, clusterID, namespace, productName string, perPage, page int, log *zap.SugaredLogger, filter ...FilterFunc) (int, []*ServiceResp, error) {
@@ -276,7 +302,14 @@ func ListWorkloads(envName, clusterID, namespace, productName string, perPage, p
 		return 0, resp, e.ErrListGroups.AddDesc(err.Error())
 	}
 	for _, v := range listDeployments {
-		workLoads = append(workLoads, &Workload{Name: v.Name, Spec: v.Spec.Template, Type: setting.Deployment, Images: wrapper.Deployment(v).ImageInfos(), Ready: wrapper.Deployment(v).Ready()})
+		workLoads = append(workLoads, &Workload{
+			Name:       v.Name,
+			Spec:       v.Spec.Template,
+			Type:       setting.Deployment,
+			Images:     wrapper.Deployment(v).ImageInfos(),
+			Ready:      wrapper.Deployment(v).Ready(),
+			Annotation: v.Annotations,
+		})
 	}
 	statefulSets, err := getter.ListStatefulSetsWithCache(nil, informer)
 	if err != nil {
@@ -284,7 +317,14 @@ func ListWorkloads(envName, clusterID, namespace, productName string, perPage, p
 		return 0, resp, e.ErrListGroups.AddDesc(err.Error())
 	}
 	for _, v := range statefulSets {
-		workLoads = append(workLoads, &Workload{Name: v.Name, Spec: v.Spec.Template, Type: setting.StatefulSet, Images: wrapper.StatefulSet(v).ImageInfos(), Ready: wrapper.StatefulSet(v).Ready()})
+		workLoads = append(workLoads, &Workload{
+			Name:       v.Name,
+			Spec:       v.Spec.Template,
+			Type:       setting.StatefulSet,
+			Images:     wrapper.StatefulSet(v).ImageInfos(),
+			Ready:      wrapper.StatefulSet(v).Ready(),
+			Annotation: v.Annotations,
+		})
 	}
 
 	log.Debugf("Found %d workloads in total", len(workLoads))
@@ -314,13 +354,29 @@ func ListWorkloads(envName, clusterID, namespace, productName string, perPage, p
 	}
 
 	hostInfos := make([]resource.HostInfo, 0)
-	ingresses, err := getter.ListIngresses(nil, informer)
-	if err == nil {
-		for _, ingress := range ingresses {
-			hostInfos = append(hostInfos, wrapper.Ingress(ingress).HostInfo()...)
+	version, err := cls.Discovery().ServerVersion()
+	if err != nil {
+		log.Errorf("Failed to get server version info for cluster: %s, the error is: %s", clusterID, err)
+		return 0, nil, err
+	}
+	if kubeclient.VersionLessThan122(version) {
+		ingresses, err := getter.ListExtensionsV1Beta1Ingresses(nil, informer)
+		if err == nil {
+			for _, ingress := range ingresses {
+				hostInfos = append(hostInfos, wrapper.Ingress(ingress).HostInfo()...)
+			}
+		} else {
+			log.Warnf("Failed to list ingresses, the error is: %s", err)
 		}
 	} else {
-		log.Warnf("Failed to list ingresses, the error is: %s", err)
+		ingresses, err := getter.ListNetworkingV1Ingress(nil, informer)
+		if err == nil {
+			for _, ingress := range ingresses {
+				hostInfos = append(hostInfos, wrapper.GetIngressHostInfo(ingress)...)
+			}
+		} else {
+			log.Warnf("Failed to list ingresses, the error is: %s", err)
+		}
 	}
 
 	// get all services
@@ -391,10 +447,53 @@ func findServiceFromIngress(hostInfos []resource.HostInfo, currentWorkload *Work
 	return resp
 }
 
+func GetProductUsedTemplateSvcs(prod *models.Product) ([]*models.Service, error) {
+	// filter releases, only list releases deployed by zadig
+	productName, envName, serviceMap := prod.ProductName, prod.EnvName, prod.GetServiceMap()
+	listOpt := &commonrepo.SvcRevisionListOption{
+		ProductName:      prod.ProductName,
+		ServiceRevisions: make([]*commonrepo.ServiceRevision, 0),
+	}
+	for _, productSvc := range serviceMap {
+		listOpt.ServiceRevisions = append(listOpt.ServiceRevisions, &commonrepo.ServiceRevision{
+			ServiceName: productSvc.ServiceName,
+			Revision:    productSvc.Revision,
+		})
+	}
+	templateServices, err := commonrepo.NewServiceColl().ListServicesWithSRevision(listOpt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list template services for pruduct: %s:%s", productName, envName)
+	}
+	return templateServices, err
+}
+
+// GetReleaseNameToServiceNameMap generates mapping relationship: releaseName=>serviceName
+func GetReleaseNameToServiceNameMap(prod *models.Product) (map[string]string, error) {
+	productName, envName := prod.ProductName, prod.EnvName
+	templateServices, err := GetProductUsedTemplateSvcs(prod)
+	if err != nil {
+		return nil, err
+	}
+	// map[ReleaseName] => serviceName
+	releaseNameMap := make(map[string]string)
+	for _, svcInfo := range templateServices {
+		releaseNameMap[util.GeneReleaseName(svcInfo.GetReleaseNaming(), productName, prod.Namespace, envName, svcInfo.ServiceName)] = svcInfo.ServiceName
+	}
+	return releaseNameMap, nil
+}
+
 // GetHelmServiceName get service name from annotations of resources deployed by helm
 // resType currently only support Deployment and StatefulSet
-func GetHelmServiceName(namespace, resType, resName string, kubeClient client.Client) (string, error) {
+// this function needs to be optimized
+func GetHelmServiceName(prod *models.Product, resType, resName string, kubeClient client.Client) (string, error) {
 	res := &unstructured.Unstructured{}
+	namespace := prod.Namespace
+
+	nameMap, err := GetReleaseNameToServiceNameMap(prod)
+	if err != nil {
+		return "", err
+	}
+
 	res.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "apps",
 		Version: "v1",
@@ -409,8 +508,9 @@ func GetHelmServiceName(namespace, resType, resName string, kubeClient client.Cl
 	}
 	annotation := res.GetAnnotations()
 	if len(annotation) > 0 {
-		if chartRelease, ok := annotation[setting.HelmReleaseNameAnnotation]; ok {
-			return util.ExtraServiceName(chartRelease, namespace), nil
+		releaseName := annotation[setting.HelmReleaseNameAnnotation]
+		if serviceName, ok := nameMap[releaseName]; ok {
+			return serviceName, nil
 		}
 	}
 	return "", fmt.Errorf("failed to get annotation from resource %s, type %s", resName, resType)

@@ -87,6 +87,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	{
 		cleanCache.POST("/oneClick", CleanImageCache)
 		cleanCache.GET("/state", CleanCacheState)
+		cleanCache.POST("/cron", SetCron)
 	}
 
 	// ---------------------------------------------------------------------------------------
@@ -161,12 +162,19 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	privateKey := router.Group("privateKey")
 	{
 		privateKey.GET("", ListPrivateKeys)
+		privateKey.GET("/internal", ListPrivateKeysInternal)
 		privateKey.GET("/:id", GetPrivateKey)
 		privateKey.GET("/labels", ListLabels)
 		privateKey.POST("", gin2.UpdateOperationLogStatus, CreatePrivateKey)
 		privateKey.POST("/batch", gin2.UpdateOperationLogStatus, BatchCreatePrivateKey)
 		privateKey.PUT("/:id", gin2.UpdateOperationLogStatus, UpdatePrivateKey)
 		privateKey.DELETE("/:id", gin2.UpdateOperationLogStatus, DeletePrivateKey)
+	}
+
+	rsaKey := router.Group("rsaKey")
+	{
+		rsaKey.GET("publicKey", GetRSAPublicKey)
+		rsaKey.GET("decryptedText", GetTextFromEncryptedKey)
 	}
 
 	notification := router.Group("notification")

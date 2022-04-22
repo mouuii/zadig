@@ -114,7 +114,7 @@ access_is_granted {
     rule.method == http_request.method
     glob.match(trim(rule.endpoint, "/"), ["/"], concat("/", input.parsed_path))
 
-    all_attributes_match(rule.matchAttributes, rule.resourceType, get_resource_id(rule.idRegex))
+    any_attribute_match(rule.matchAttributes, rule.resourceType, get_resource_id(rule.idRegex))
 }
 
 access_is_granted {
@@ -124,7 +124,7 @@ access_is_granted {
     rule.method == http_request.method
     glob.match(trim(rule.endpoint, "/"), ["/"], concat("/", input.parsed_path))
 
-    all_attributes_match(rule.matchAttributes, rule.resourceType, get_resource_id(rule.idRegex))
+    any_attribute_match(rule.matchAttributes, rule.resourceType, get_resource_id(rule.idRegex))
 }
 
 rule_is_matched_for_filtering {
@@ -215,7 +215,7 @@ user_matched_role_rule_for_filtering[rule] {
 }
 
 
-all_attributes_match(attributes, resourceType, resourceID) {
+any_attribute_match(attributes, resourceType, resourceID) {
     res := data.resources[resourceType][_]
     res.resourceID == resourceID
     project_name_is_match(res)
@@ -223,23 +223,6 @@ all_attributes_match(attributes, resourceType, resourceID) {
     attributes_match(attributes, res)
 }
 
-attributes_match(attributes, res) {
-    attribute := attributes[_]
-    attribute_match(attribute, res)
-}
-
-attributes_mismatch(attributes, res) {
-    attribute := attributes[_]
-    attribute_mismatch(attribute, res)
-}
-
-attribute_mismatch(attribute, res) {
-    res.spec[attribute.key] != attribute.value
-}
-
-attribute_mismatch(attribute, res) {
-    not res.spec[attribute.key]
-}
 
 get_resource_id(idRegex) = id {
     output := regex.find_all_string_submatch_n(trim(idRegex, "/"), concat("/", input.parsed_path), -1)
@@ -427,6 +410,7 @@ allowed_role_attributive_rules[rule] {
     rule := allowed_role_rules[_]
     rule.matchAttributes
 }
+
 allowed_policy_attributive_rules[rule] {
     rule := allowed_policy_rules[_]
     rule.matchExpressions
